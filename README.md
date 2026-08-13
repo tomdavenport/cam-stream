@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="#install-and-enable"><strong>Install the Quattro plugin</strong></a>
+  <a href="#install"><strong>Install the Quattro plugin</strong></a>
   ·
   <a href="https://aur.archlinux.org/packages/cam-stream"><strong>Get the standalone AUR command</strong></a>
   ·
@@ -29,6 +29,41 @@ mirror the picture, or trade lower latency for smoother playback.
 The widget follows the active Omarchy theme and shows distinct live, stopped,
 error, and no-camera states. Its camera helper is bundled in this repository;
 the widget does not look for a separately installed `cam-stream` command.
+
+## Install
+
+### Omarchy 4 / Quattro plugin
+
+Install the native bar widget and enable it immediately:
+
+```bash
+omarchy plugin add https://github.com/tomdavenport/cam-stream.git --enable
+```
+
+No AUR package is needed for the widget: the plugin includes its own helper.
+Left click the new camera icon to toggle the preview, or right click it for the
+camera, mirror, and latency controls.
+
+### Arch Linux / AUR command
+
+Install the standalone command without the Quattro widget:
+
+```bash
+yay -S cam-stream
+```
+
+This installs `cam-stream` at `/usr/bin/cam-stream`. It is useful on Arch and
+other Wayland desktops, but it does not add the native Omarchy bar control.
+
+## Omarchy plugin gallery
+
+Cam Stream has already been submitted to the project-recommended community
+gallery. Its [submission issue](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/129)
+has passed automated Quattro validation and the automated security baseline,
+and is awaiting maintainer listing review.
+
+Plugin authors can submit another public Quattro plugin by following the
+marketplace's [submission guide](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/blob/main/SUBMISSION.md).
 
 ## Requirements
 
@@ -56,7 +91,7 @@ Install any missing packages through Omarchy's standard package workflow before
 enabling the plugin. Add `psmisc` if you want busy-camera process reporting.
 Omarchy already ships `hyprctl` as part of its desktop.
 
-## Standalone command on Arch Linux
+## Standalone AUR details
 
 The [`cam-stream` AUR package](https://aur.archlinux.org/packages/cam-stream)
 builds the latest stable release and installs the command at
@@ -81,7 +116,7 @@ The AUR package is intentionally command-only. To add the native Quattro bar
 control, use the Omarchy installation below; that plugin remains self-contained
 and does not depend on the AUR package.
 
-## Install and enable
+## Review-first Omarchy installation
 
 Omarchy plugins are unsandboxed code. The review-first path is to add Cam
 Stream, inspect the checkout, and then enable it:
