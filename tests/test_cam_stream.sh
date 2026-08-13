@@ -214,8 +214,14 @@ setup_case
 : > "$DEV_DIR/video0"
 export HYPRLAND_INSTANCE_SIGNATURE="test"
 $CAM_STREAM start >/dev/null
-sleep 1.2
-hypr_calls="$(<"$CAM_STREAM_HYPR_LOG")"
+for _ in {1..100}; do
+  [[ -s $CAM_STREAM_HYPR_LOG ]] && break
+  sleep 0.05
+done
+hypr_calls=""
+if [[ -r $CAM_STREAM_HYPR_LOG ]]; then
+  hypr_calls="$(<"$CAM_STREAM_HYPR_LOG")"
+fi
 assert_contains "$hypr_calls" 'hl.dsp.window.float' "Quattro floating dispatch is attempted"
 assert_contains "$hypr_calls" 'hl.dsp.window.resize' "Quattro numeric resize dispatch is attempted"
 assert_contains "$hypr_calls" 'x = 1400, y = 770' "Quattro positioning uses monitor geometry"

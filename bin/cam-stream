@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="cam-stream"
-VERSION="1.0.0"
+VERSION="1.0.1"
 APP_ID="io.github.tomdavenport.cam-stream"
 WINDOW_TITLE="Cam Stream Camera Preview"
 

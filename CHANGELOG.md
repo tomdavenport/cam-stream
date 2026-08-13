@@ -2,6 +2,13 @@
 
 All notable changes to Cam Stream are documented here.
 
+## 1.0.1 — 2026-08-13
+
+- Document standalone Arch Linux installation separately from the Omarchy
+  bar-widget plugin.
+- Make the asynchronous window-positioning test reliable on slower builders.
+- Run the camera helper's behavioral suite in continuous integration.
+
 ## 1.0.0 — 2026-08-13
 
 - Package Cam Stream as an Omarchy Quattro bar-widget plugin.

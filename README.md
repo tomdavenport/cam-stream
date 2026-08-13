@@ -10,8 +10,13 @@ the widget does not look for a separately installed `cam-stream` command.
 
 ## Requirements
 
-Cam Stream requires **Omarchy 4 (Quattro)** and its Quickshell-based shell and
-plugin commands. It is not a Waybar module and does not support Omarchy 3.
+The native bar widget requires **Omarchy 4 (Quattro)** and its
+Quickshell-based shell and plugin commands. It is not a Waybar module and does
+not support Omarchy 3.
+
+The bundled `cam-stream` command also works on its own on Arch Linux and other
+Wayland desktops with V4L2 camera support. Standalone use does not require
+Omarchy, but it does not install the bar widget.
 
 Runtime dependencies:
 
@@ -28,6 +33,31 @@ is optional for reporting which process has a busy camera.
 Install any missing packages through Omarchy's standard package workflow before
 enabling the plugin. Add `psmisc` if you want busy-camera process reporting.
 Omarchy already ships `hyprctl` as part of its desktop.
+
+## Standalone command on Arch Linux
+
+The [`cam-stream` AUR package](https://aur.archlinux.org/packages/cam-stream)
+builds the latest stable release and installs the command at
+`/usr/bin/cam-stream`. Using the standard manual AUR workflow:
+
+```bash
+git clone https://aur.archlinux.org/cam-stream.git
+cd cam-stream
+makepkg -si
+```
+
+Then inspect the available cameras and start a preview:
+
+```bash
+cam-stream camera list
+cam-stream doctor
+cam-stream start
+cam-stream stop
+```
+
+The AUR package is intentionally command-only. To add the native Quattro bar
+control, use the Omarchy installation below; that plugin remains self-contained
+and does not depend on the AUR package.
 
 ## Install and enable
 

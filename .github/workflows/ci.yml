@@ -42,6 +42,9 @@ jobs:
           )
           shellcheck "${shell_files[@]}"
 
+      - name: Test camera helper behavior
+        run: ./tests/test_cam_stream.sh
+
       - name: Parse QML with Qt 6
         shell: bash
         run: |
