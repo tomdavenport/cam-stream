@@ -1,5 +1,27 @@
 # Cam Stream
 
+<p align="center">
+  <strong>A native, one-click camera preview for Omarchy 4 / Quattro.</strong><br>
+  Open a low-latency floating preview, switch inputs, mirror the image, and get
+  back to work.
+</p>
+
+<p align="center">
+  <img
+    src="assets/cam-stream-hero.png"
+    alt="Cam Stream running on an Omarchy Quattro desktop, with a live streamer camera preview and the native control panel open"
+    width="100%"
+  >
+</p>
+
+<p align="center">
+  <a href="#install-and-enable"><strong>Install the Quattro plugin</strong></a>
+  ·
+  <a href="https://aur.archlinux.org/packages/cam-stream"><strong>Get the standalone AUR command</strong></a>
+  ·
+  <a href="LICENSE"><strong>MIT licensed</strong></a>
+</p>
+
 Cam Stream puts a camera-preview control in the Omarchy bar. Left click the
 camera icon to start or stop the preview. Right click it to choose a camera,
 mirror the picture, or trade lower latency for smoother playback.
