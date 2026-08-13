@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Static validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check Bash syntax
+        shell: bash
+        run: |
+          mapfile -d '' shell_files < <(
+            find bin scripts tests -type f \
+              \( -name '*.sh' -o -path 'bin/cam-stream' \) -print0
+          )
+          (( ${#shell_files[@]} > 0 ))
+          bash -n "${shell_files[@]}"
+
+      - name: Run ShellCheck
+        shell: bash
+        run: |
+          command -v shellcheck
+          mapfile -d '' shell_files < <(
+            find bin scripts tests -type f \
+              \( -name '*.sh' -o -path 'bin/cam-stream' \) -print0
+          )
+          shellcheck "${shell_files[@]}"
+
+      - name: Parse QML with Qt 6
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes qt6-declarative-dev-tools
+          /usr/lib/qt6/bin/qmlformat BarWidget.qml >/dev/null
+
+      - name: Validate Quattro marketplace package
+        run: ./scripts/validate.sh
+
+      - name: Test validation policy
+        run: ./tests/validate-test.sh

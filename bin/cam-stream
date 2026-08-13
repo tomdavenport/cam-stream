@@ -1,0 +1,988 @@
+#!/bin/bash
+set -euo pipefail
+
+PROGRAM="cam-stream"
+VERSION="1.0.0"
+APP_ID="io.github.tomdavenport.cam-stream"
+WINDOW_TITLE="Cam Stream Camera Preview"
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME:?HOME is not set}/.config}"
+STATE_HOME="${XDG_STATE_HOME:-${HOME:?HOME is not set}/.local/state}"
+CONFIG_DIR="$CONFIG_HOME/cam-stream"
+STATE_DIR="$STATE_HOME/cam-stream"
+CONFIG_FILE="$CONFIG_DIR/config"
+LOG_FILE="$STATE_DIR/cam-stream.log"
+PID_FILE="$STATE_DIR/cam-stream.pid"
+ACTIVE_FILE="$STATE_DIR/active"
+
+runtime_base() {
+  local candidate="${XDG_RUNTIME_DIR:-}"
+
+  if [[ -n $candidate && -d $candidate && -w $candidate && -O $candidate ]]; then
+    printf '%s\n' "$candidate"
+    return
+  fi
+
+  candidate="${TMPDIR:-/tmp}/cam-stream-runtime-$(id -u)"
+  if [[ -L $candidate ]]; then
+    printf '%s: unsafe runtime path is a symbolic link: %s\n' "$PROGRAM" "$candidate" >&2
+    return 1
+  fi
+  if [[ -e $candidate && ! -d $candidate ]]; then
+    printf '%s: unsafe runtime path is not a directory: %s\n' "$PROGRAM" "$candidate" >&2
+    return 1
+  fi
+  if [[ -d $candidate && ! -O $candidate ]]; then
+    printf '%s: unsafe runtime path is owned by another user: %s\n' "$PROGRAM" "$candidate" >&2
+    return 1
+  fi
+
+  (umask 077; mkdir -p "$candidate")
+  chmod 700 "$candidate"
+  printf '%s\n' "$candidate"
+}
+
+RUNTIME_BASE="$(runtime_base)"
+RUNTIME_DIR="$RUNTIME_BASE/cam-stream"
+(umask 077; mkdir -p "$RUNTIME_DIR")
+chmod 700 "$RUNTIME_DIR"
+IPC="$RUNTIME_DIR/mpv.sock"
+LOCK_FILE="$RUNTIME_DIR/control.lock"
+
+DEFAULT_MIRROR="false"
+DEFAULT_LATENCY="untimed"
+DEFAULT_WINDOW_SIZE="480x270"
+CONFIG_CAMERA=""
+CONFIG_CARD=""
+CONFIG_BUS=""
+CONFIG_MIRROR="$DEFAULT_MIRROR"
+CONFIG_LATENCY="$DEFAULT_LATENCY"
+CONFIG_WINDOW_SIZE="$DEFAULT_WINDOW_SIZE"
+
+MIRROR="$DEFAULT_MIRROR"
+LATENCY="$DEFAULT_LATENCY"
+WINDOW_SIZE="${CAM_STREAM_WINDOW_SIZE:-$DEFAULT_WINDOW_SIZE}"
+MIRROR_EXPLICIT="false"
+LATENCY_EXPLICIT="false"
+DEV=""
+CHOOSE="false"
+OVERRIDE_FMT=""
+OVERRIDE_SIZE=""
+OVERRIDE_FPS=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  cam-stream [toggle] [options] [camera]
+  cam-stream start|stop|restart [options] [camera]
+  cam-stream status [--json]
+  cam-stream camera list [--json]
+  cam-stream camera select <index|device|match> [--force]
+  cam-stream camera show [--json]
+  cam-stream camera diagnose [camera]
+  cam-stream settings show [--json]
+  cam-stream settings set mirror <true|false>
+  cam-stream settings set latency <untimed|smooth>
+  cam-stream doctor [camera] [--json]
+  cam-stream logs [lines]
+
+Launch options:
+  -c, --choose                    Interactively choose a camera
+  -m, --mirror                    Mirror the preview (saved)
+      --no-mirror                 Do not mirror the preview (saved)
+      --untimed                   Lowest latency (saved; default)
+      --smooth                    Smoother playback with more latency (saved)
+      --format mjpeg|yuyv422|nv12 Force the V4L2 input format
+      --size WxH                  Force the input size
+      --fps N                     Force the input frame rate
+      --window-size WxH           Preview window size
+      --restart                   Legacy: restart instead of toggling off
+  -l, --list                      Legacy: list cameras
+  -h, --help                      Show this help
+      --version                   Show the version
+
+The no-command form remains a toggle for compatibility.
+USAGE
+}
+
+die_usage() {
+  printf '%s: %s\n' "$PROGRAM" "$1" >&2
+  printf "Try '%s --help' for usage.\n" "$PROGRAM" >&2
+  exit 2
+}
+
+json_escape() {
+  local value="$1"
+  value=${value//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//$'\n'/\\n}
+  value=${value//$'\r'/\\r}
+  value=${value//$'\t'/\\t}
+  printf '%s' "$value"
+}
+
+json_string_or_null() {
+  if [[ -n $1 ]]; then
+    printf '"%s"' "$(json_escape "$1")"
+  else
+    printf 'null'
+  fi
+}
+
+json_number_array() {
+  local value item first="true"
+  value="${1:-}"
+  printf '['
+  for item in $value; do
+    [[ $item =~ ^[0-9]+$ ]] || continue
+    if [[ $first == "false" ]]; then printf ','; fi
+    printf '%s' "$item"
+    first="false"
+  done
+  printf ']'
+}
+
+load_config() {
+  local key value
+  CONFIG_CAMERA=""
+  CONFIG_CARD=""
+  CONFIG_BUS=""
+  CONFIG_MIRROR="$DEFAULT_MIRROR"
+  CONFIG_LATENCY="$DEFAULT_LATENCY"
+  CONFIG_WINDOW_SIZE="$DEFAULT_WINDOW_SIZE"
+
+  [[ -r $CONFIG_FILE ]] || return 0
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    [[ -n ${key:-} && $key != \#* ]] || continue
+    case "$key" in
+      camera) CONFIG_CAMERA="$value" ;;
+      card) CONFIG_CARD="$value" ;;
+      bus) CONFIG_BUS="$value" ;;
+      mirror)
+        [[ $value == "true" || $value == "false" ]] && CONFIG_MIRROR="$value"
+        ;;
+      latency)
+        [[ $value == "untimed" || $value == "smooth" ]] && CONFIG_LATENCY="$value"
+        ;;
+      window_size)
+        [[ $value =~ ^[0-9]+x[0-9]+$ ]] && CONFIG_WINDOW_SIZE="$value"
+        ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
+config_value_safe() {
+  [[ $1 != *$'\n'* && $1 != *$'\r'* ]]
+}
+
+write_config() {
+  config_value_safe "$CONFIG_CAMERA" || return 1
+  config_value_safe "$CONFIG_CARD" || return 1
+  config_value_safe "$CONFIG_BUS" || return 1
+  mkdir -p "$CONFIG_DIR"
+  chmod 700 "$CONFIG_DIR" 2>/dev/null || true
+  local tmp="$CONFIG_DIR/.config.$$"
+  (umask 077
+    {
+      printf '# cam-stream configuration v1\n'
+      printf 'camera=%s\n' "$CONFIG_CAMERA"
+      printf 'card=%s\n' "$CONFIG_CARD"
+      printf 'bus=%s\n' "$CONFIG_BUS"
+      printf 'mirror=%s\n' "$CONFIG_MIRROR"
+      printf 'latency=%s\n' "$CONFIG_LATENCY"
+      printf 'window_size=%s\n' "$CONFIG_WINDOW_SIZE"
+    } > "$tmp"
+  )
+  mv -f "$tmp" "$CONFIG_FILE"
+}
+
+load_active() {
+  ACTIVE_CAMERA=""
+  ACTIVE_MIRROR=""
+  ACTIVE_LATENCY=""
+  [[ -r $ACTIVE_FILE ]] || return 0
+  local key value
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    case "$key" in
+      camera) ACTIVE_CAMERA="$value" ;;
+      mirror) ACTIVE_MIRROR="$value" ;;
+      latency) ACTIVE_LATENCY="$value" ;;
+    esac
+  done < "$ACTIVE_FILE"
+}
+
+write_active() {
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  local tmp="$STATE_DIR/.active.$$"
+  (umask 077
+    {
+      printf 'camera=%s\n' "$1"
+      printf 'mirror=%s\n' "$2"
+      printf 'latency=%s\n' "$3"
+    } > "$tmp"
+  )
+  mv -f "$tmp" "$ACTIVE_FILE"
+}
+
+camera_device_caps_block() {
+  awk '
+    /Device Caps/ { in_caps=1; next }
+    in_caps && /^[[:space:]]{2,}[^[:space:]]/ {
+      sub(/^[[:space:]]+/, "", $0); print; next
+    }
+    in_caps && !/^[[:space:]]{2,}[^[:space:]]/ { in_caps=0 }
+  ' <<< "$1"
+}
+
+camera_role_from_info() {
+  local caps has_capture="false" has_metadata="false"
+  caps="$(camera_device_caps_block "$1")"
+  [[ -n $caps ]] || caps="$1"
+  grep -Eq '^Video Capture([[:space:]]|$)|^Video Capture Multiplanar([[:space:]]|$)' <<< "$caps" && has_capture="true"
+  grep -Eq '^Metadata Capture([[:space:]]|$)' <<< "$caps" && has_metadata="true"
+  if [[ $has_capture == "true" && $has_metadata == "true" ]]; then
+    printf 'capture+metadata\n'
+  elif [[ $has_capture == "true" ]]; then
+    printf 'capture\n'
+  elif [[ $has_metadata == "true" ]]; then
+    printf 'metadata\n'
+  else
+    printf 'unknown\n'
+  fi
+}
+
+device_glob() {
+  if [[ -n ${CAM_STREAM_DEV_GLOB:-} ]]; then
+    printf '%s\n' "$CAM_STREAM_DEV_GLOB"
+  else
+    printf '/dev/video*\n'
+  fi
+}
+
+stable_roots() {
+  if [[ -n ${CAM_STREAM_V4L_DIR:-} ]]; then
+    printf '%s\n' "$CAM_STREAM_V4L_DIR/by-id" "$CAM_STREAM_V4L_DIR/by-path"
+  else
+    printf '/dev/v4l/by-id\n/dev/v4l/by-path\n'
+  fi
+}
+
+stable_device_path() {
+  local dev="$1" real candidate root
+  real="$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")"
+  while IFS= read -r root; do
+    for candidate in "$root"/*video-index0; do
+      [[ -e $candidate ]] || continue
+      if [[ $(readlink -f "$candidate" 2>/dev/null || true) == "$real" ]]; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  done < <(stable_roots)
+  printf '%s\n' "$dev"
+}
+
+camera_rows() {
+  local pattern dev info card bus role readable writable busy stable
+  pattern="$(device_glob)"
+  shopt -s nullglob
+  # The unquoted pattern is intentional; tests override it with an isolated glob.
+  for dev in $pattern; do
+    [[ -e $dev ]] || continue
+    info=""
+    if command -v v4l2-ctl >/dev/null 2>&1; then
+      info="$(v4l2-ctl -d "$dev" --all 2>/dev/null || true)"
+    fi
+    if [[ -n $info ]]; then
+      card="$(awk -F': ' '/Card type/{print $2; exit}' <<< "$info")"
+      bus="$(awk -F': ' '/Bus info/{print $2; exit}' <<< "$info")"
+      role="$(camera_role_from_info "$info")"
+    else
+      card="(unreadable)"
+      bus="(unknown)"
+      role="unknown"
+    fi
+    readable="false"; writable="false"
+    [[ -r $dev ]] && readable="true"
+    [[ -w $dev ]] && writable="true"
+    busy=""
+    if command -v fuser >/dev/null 2>&1; then
+      busy="$(fuser "$dev" 2>/dev/null | xargs 2>/dev/null || true)"
+    fi
+    stable="$(stable_device_path "$dev")"
+    printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
+      "$dev" "$stable" "$role" "${card:-?}" "${bus:-?}" "$readable" "$writable" "$busy"
+  done
+  shopt -u nullglob
+}
+
+camera_matches_saved() {
+  local dev stable role card bus readable writable busy configured_real
+  [[ -n $CONFIG_CAMERA ]] || return 1
+  if [[ -e $CONFIG_CAMERA ]]; then
+    stable_device_path "$CONFIG_CAMERA"
+    return
+  fi
+  configured_real="$(readlink -f "$CONFIG_CAMERA" 2>/dev/null || true)"
+  while IFS='|' read -r dev stable role card bus readable writable busy; do
+    [[ -n $dev ]] || continue
+    [[ $role == "capture" || $role == "capture+metadata" || $role == "unknown" ]] || continue
+    if [[ -n $configured_real && $(readlink -f "$dev" 2>/dev/null || true) == "$configured_real" ]]; then
+      printf '%s\n' "$stable"; return
+    fi
+    if [[ -n $CONFIG_BUS && $bus == "$CONFIG_BUS" ]]; then
+      printf '%s\n' "$stable"; return
+    fi
+    if [[ -n $CONFIG_CARD && $card == "$CONFIG_CARD" ]]; then
+      printf '%s\n' "$stable"; return
+    fi
+  done < <(camera_rows)
+  return 1
+}
+
+preferred_camera() {
+  if [[ -n ${CAM_STREAM_CAMERA:-} ]]; then
+    printf '%s\n' "$CAM_STREAM_CAMERA"
+    return
+  fi
+  camera_matches_saved
+}
+
+camera_first_capture() {
+  local first_unknown="" dev stable role card bus readable writable busy
+  while IFS='|' read -r dev stable role card bus readable writable busy; do
+    [[ -n $dev ]] || continue
+    if [[ $role == "capture" || $role == "capture+metadata" ]]; then
+      printf '%s\n' "$stable"
+      return
+    fi
+    if [[ $role == "unknown" && -z $first_unknown ]]; then
+      first_unknown="$stable"
+    fi
+  done < <(camera_rows)
+  [[ -n $first_unknown ]] && printf '%s\n' "$first_unknown"
+}
+
+camera_resolve_target() {
+  local target="$1" row dev stable role card bus readable writable busy
+  local -a rows=()
+  mapfile -t rows < <(camera_rows)
+  (( ${#rows[@]} > 0 )) || { printf '%s: no camera devices found\n' "$PROGRAM" >&2; return 1; }
+  if [[ $target =~ ^[0-9]+$ ]]; then
+    (( target >= 1 && target <= ${#rows[@]} )) || { printf '%s: camera index out of range: %s\n' "$PROGRAM" "$target" >&2; return 1; }
+    IFS='|' read -r dev stable _ <<< "${rows[target-1]}"
+    printf '%s\n' "$stable"
+    return
+  fi
+  if [[ $target == /* ]]; then
+    [[ -e $target ]] || { printf '%s: camera not found: %s\n' "$PROGRAM" "$target" >&2; return 1; }
+    printf '%s\n' "$target"
+    return
+  fi
+  for row in "${rows[@]}"; do
+    IFS='|' read -r dev stable role card bus readable writable busy <<< "$row"
+    if [[ ${dev,,} == *${target,,}* || ${stable,,} == *${target,,}* || ${card,,} == *${target,,}* || ${bus,,} == *${target,,}* ]]; then
+      printf '%s\n' "$stable"
+      return
+    fi
+  done
+  printf '%s: no camera matched: %s\n' "$PROGRAM" "$target" >&2
+  return 1
+}
+
+camera_list_json() {
+  local selected selected_real row dev stable role card bus readable writable busy dev_real first="true" index=0
+  load_config
+  selected="$(preferred_camera 2>/dev/null || true)"
+  selected_real="$(readlink -f "$selected" 2>/dev/null || printf '%s' "$selected")"
+  printf '{"schemaVersion":1,"cameras":['
+  while IFS= read -r row; do
+    [[ -n $row ]] || continue
+    IFS='|' read -r dev stable role card bus readable writable busy <<< "$row"
+    ((index += 1))
+    dev_real="$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")"
+    [[ $first == "true" ]] || printf ','
+    first="false"
+    printf '{"index":%d,"device":"%s","stablePath":"%s","role":"%s","card":"%s","bus":"%s","readable":%s,"writable":%s,"busyPids":' \
+      "$index" "$(json_escape "$dev")" "$(json_escape "$stable")" "$(json_escape "$role")" \
+      "$(json_escape "$card")" "$(json_escape "$bus")" "$readable" "$writable"
+    json_number_array "$busy"
+    if [[ -n $selected_real && $dev_real == "$selected_real" ]]; then
+      printf ',"selected":true}'
+    else
+      printf ',"selected":false}'
+    fi
+  done < <(camera_rows)
+  printf ']}\n'
+}
+
+camera_list_human() {
+  local -a rows=()
+  local selected selected_real dev stable role card bus readable writable busy dev_real marker index
+  load_config
+  selected="$(preferred_camera 2>/dev/null || true)"
+  selected_real="$(readlink -f "$selected" 2>/dev/null || printf '%s' "$selected")"
+  mapfile -t rows < <(camera_rows)
+  if (( ${#rows[@]} == 0 )); then
+    printf 'No cameras found.\n'
+    return
+  fi
+  printf '%-4s %-2s %-16s %-18s %-9s %-7s %s\n' "IDX" "*" "DEVICE" "ROLE" "PERMS" "BUSY" "DETAILS"
+  for ((index=0; index<${#rows[@]}; index++)); do
+    IFS='|' read -r dev stable role card bus readable writable busy <<< "${rows[index]}"
+    dev_real="$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")"
+    marker=" "
+    [[ -n $selected_real && $dev_real == "$selected_real" ]] && marker="*"
+    printf '%-4d %-2s %-16s %-18s r:%-1s w:%-1s %-7s %s | %s\n' \
+      "$((index + 1))" "$marker" "$dev" "$role" "${readable:0:1}" "${writable:0:1}" "${busy:--}" "$card" "$bus"
+  done
+}
+
+camera_list_command() {
+  case "${1:-}" in
+    "") camera_list_human ;;
+    --json) camera_list_json ;;
+    *) die_usage "unexpected camera list argument: $1" ;;
+  esac
+}
+
+camera_select_command() {
+  local target="" force="false" dev real info role card bus stable
+  while (( $# > 0 )); do
+    case "$1" in
+      --force) force="true" ;;
+      -h|--help) printf 'Usage: cam-stream camera select <index|device|match> [--force]\n'; return ;;
+      -*) die_usage "unknown camera select option: $1" ;;
+      *) [[ -z $target ]] || die_usage "unexpected camera select argument: $1"; target="$1" ;;
+    esac
+    shift
+  done
+  [[ -n $target ]] || die_usage "missing camera target"
+  dev="$(camera_resolve_target "$target")"
+  real="$(readlink -f "$dev" 2>/dev/null || printf '%s' "$dev")"
+  info="$(v4l2-ctl -d "$real" --all 2>/dev/null || true)"
+  [[ -n $info ]] || { printf '%s: unable to probe camera: %s\n' "$PROGRAM" "$dev" >&2; return 1; }
+  role="$(camera_role_from_info "$info")"
+  if [[ $role == "metadata" && $force != "true" ]]; then
+    printf '%s: %s is metadata-only; select a capture device or pass --force\n' "$PROGRAM" "$dev" >&2
+    return 1
+  fi
+  card="$(awk -F': ' '/Card type/{print $2; exit}' <<< "$info")"
+  bus="$(awk -F': ' '/Bus info/{print $2; exit}' <<< "$info")"
+  stable="$(stable_device_path "$real")"
+  load_config
+  CONFIG_CAMERA="$stable"; CONFIG_CARD="$card"; CONFIG_BUS="$bus"
+  write_config
+  printf 'Selected camera: %s (%s)\n' "$stable" "$role"
+}
+
+settings_show() {
+  load_config
+  case "${1:-}" in
+    "")
+      printf 'Mirror: %s\nLatency: %s\nWindow size: %s\n' "$CONFIG_MIRROR" "$CONFIG_LATENCY" "$CONFIG_WINDOW_SIZE"
+      ;;
+    --json)
+      printf '{"schemaVersion":1,"mirror":%s,"latencyMode":"%s","windowSize":"%s"}\n' \
+        "$CONFIG_MIRROR" "$CONFIG_LATENCY" "$(json_escape "$CONFIG_WINDOW_SIZE")"
+      ;;
+    *) die_usage "unexpected settings show argument: $1" ;;
+  esac
+}
+
+settings_set() {
+  local key="${1:-}" value="${2:-}"
+  (( $# == 2 )) || die_usage "settings set expects a key and value"
+  load_config
+  case "$key" in
+    mirror)
+      [[ $value == "true" || $value == "false" ]] || die_usage "mirror must be true or false"
+      CONFIG_MIRROR="$value"
+      ;;
+    latency)
+      [[ $value == "untimed" || $value == "smooth" ]] || die_usage "latency must be untimed or smooth"
+      CONFIG_LATENCY="$value"
+      ;;
+    window-size|window_size)
+      [[ $value =~ ^[0-9]+x[0-9]+$ ]] || die_usage "window size must look like 480x270"
+      CONFIG_WINDOW_SIZE="$value"
+      ;;
+    *) die_usage "unknown setting: $key" ;;
+  esac
+  write_config
+  printf 'Saved %s=%s\n' "$key" "$value"
+}
+
+process_matches() {
+  local pid="$1"
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq -- "--input-ipc-server=$IPC"
+}
+
+running_pid() {
+  local pid=""
+  if [[ -r $PID_FILE ]]; then
+    read -r pid < "$PID_FILE" || true
+    if process_matches "$pid"; then printf '%s\n' "$pid"; return; fi
+  fi
+  while IFS= read -r pid; do
+    if process_matches "$pid"; then printf '%s\n' "$pid"; return; fi
+  done < <(pgrep -x mpv 2>/dev/null || true)
+  return 1
+}
+
+status_command() {
+  local json="false" pid="" running="false" ipc_state="absent" preferred="" camera="" mirror latency
+  case "${1:-}" in "") ;; --json) json="true" ;; *) die_usage "unexpected status argument: $1" ;; esac
+  load_config
+  pid="$(running_pid 2>/dev/null || true)"
+  [[ -n $pid ]] && running="true"
+  if [[ -S $IPC ]]; then
+    if [[ $running == "true" ]]; then ipc_state="ready"; else ipc_state="stale"; fi
+  elif [[ -e $IPC ]]; then
+    ipc_state="stale"
+  fi
+  preferred="$(preferred_camera 2>/dev/null || true)"
+  mirror="$CONFIG_MIRROR"; latency="$CONFIG_LATENCY"
+  if [[ $running == "true" ]]; then
+    load_active
+    camera="$ACTIVE_CAMERA"
+    [[ -n $ACTIVE_MIRROR ]] && mirror="$ACTIVE_MIRROR"
+    [[ -n $ACTIVE_LATENCY ]] && latency="$ACTIVE_LATENCY"
+  fi
+  if [[ $json == "true" ]]; then
+    printf '{"schemaVersion":1,"running":%s,"pid":' "$running"
+    if [[ -n $pid ]]; then printf '%s' "$pid"; else printf 'null'; fi
+    printf ',"ipc":"%s","camera":' "$ipc_state"
+    json_string_or_null "$camera"
+    printf ',"preferredCamera":'
+    json_string_or_null "$preferred"
+    printf ',"mirror":%s,"latencyMode":"%s","appId":"%s","title":"%s"}\n' \
+      "$mirror" "$latency" "$APP_ID" "$WINDOW_TITLE"
+  else
+    if [[ $running == "true" ]]; then printf 'Preview: running (PID %s)\n' "$pid"; else printf 'Preview: stopped\n'; fi
+    printf 'IPC: %s (%s)\n' "$ipc_state" "$IPC"
+    printf 'Camera: %s\n' "${camera:-${preferred:-auto}}"
+    printf 'Mirror: %s\nLatency: %s\nLog: %s\n' "$mirror" "$latency" "$LOG_FILE"
+  fi
+}
+
+device_busy_pids() {
+  command -v fuser >/dev/null 2>&1 || return 0
+  fuser "$1" 2>/dev/null | xargs 2>/dev/null || true
+}
+
+detect_v4l2_mode() {
+  local dev="$1" out fourcc detected
+  FMT="mjpeg"; SIZE="1280x720"; FPS="30"
+  command -v v4l2-ctl >/dev/null 2>&1 || return 0
+  out="$(v4l2-ctl -d "$dev" --list-formats-ext 2>/dev/null || true)"
+  fourcc="$(awk -F"'" '/\[[0-9]+\]:/{print $2; exit}' <<< "$out")"
+  case "$fourcc" in MJPG) FMT="mjpeg" ;; YUYV) FMT="yuyv422" ;; NV12) FMT="nv12" ;; esac
+  detected="$(awk '/Size: Discrete/{print $3; exit}' <<< "$out")"
+  [[ -n $detected ]] && SIZE="$detected"
+  detected="$(awk -F'[()]' '/Interval: Discrete/{gsub(/ fps/,"",$2); print $2; exit}' <<< "$out")"
+  [[ -n $detected ]] && FPS="$detected"
+  return 0
+}
+
+apply_launch_overrides() {
+  if [[ -n $OVERRIDE_FMT ]]; then
+    case "$OVERRIDE_FMT" in mjpeg|yuyv422|nv12) FMT="$OVERRIDE_FMT" ;; *) die_usage "unsupported format: $OVERRIDE_FMT" ;; esac
+  fi
+  if [[ -n $OVERRIDE_SIZE ]]; then
+    [[ $OVERRIDE_SIZE =~ ^[0-9]+x[0-9]+$ ]] || die_usage "invalid size: $OVERRIDE_SIZE"
+    SIZE="$OVERRIDE_SIZE"
+  fi
+  if [[ -n $OVERRIDE_FPS ]]; then
+    [[ $OVERRIDE_FPS =~ ^[0-9]+([.][0-9]+)?$ ]] || die_usage "invalid fps: $OVERRIDE_FPS"
+    FPS="$OVERRIDE_FPS"
+  fi
+}
+
+best_effort_position() {
+  local pid="$1" client monitor address monitor_id
+  local monitor_x monitor_y monitor_width monitor_height target_width target_height target_x target_y window
+  command -v hyprctl >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] || return 0
+  for _ in {1..20}; do
+    client="$(hyprctl clients -j 2>/dev/null | jq -cer --argjson pid "$pid" 'first(.[] | select(.pid == $pid)) // empty' 2>/dev/null || true)"
+    [[ -n $client ]] && break
+    sleep 0.05
+  done
+  [[ -n $client ]] || return 0
+
+  read -r address monitor_id < <(jq -r '[.address, .monitor] | @tsv' <<< "$client")
+  [[ -n $address && $monitor_id =~ ^[0-9]+$ ]] || return 0
+  monitor="$(hyprctl monitors -j 2>/dev/null | jq -cer --argjson id "$monitor_id" 'first(.[] | select(.id == $id)) // empty' 2>/dev/null || true)"
+  [[ -n $monitor ]] || return 0
+  read -r monitor_x monitor_y monitor_width monitor_height < <(
+    jq -r '
+      . as $m |
+      (($m.transform // 0) % 2 == 1) as $rotated |
+      [$m.x, $m.y,
+       (((if $rotated then $m.height else $m.width end) / $m.scale) | floor),
+       (((if $rotated then $m.width else $m.height end) / $m.scale) | floor)] | @tsv
+    ' <<< "$monitor"
+  )
+  [[ $monitor_x =~ ^-?[0-9]+$ && $monitor_y =~ ^-?[0-9]+$ && $monitor_width =~ ^[0-9]+$ && $monitor_height =~ ^[0-9]+$ ]] || return 0
+  [[ $WINDOW_SIZE =~ ^([0-9]+)x([0-9]+)$ ]] || return 0
+  target_width="${BASH_REMATCH[1]}"
+  target_height="${BASH_REMATCH[2]}"
+  target_x=$((monitor_x + monitor_width - target_width - 40))
+  target_y=$((monitor_y + monitor_height - target_height - 40))
+  (( target_x < monitor_x + 40 )) && target_x=$((monitor_x + 40))
+  (( target_y < monitor_y + 40 )) && target_y=$((monitor_y + 40))
+  window="address:$address"
+
+  # Use Quattro's Lua dispatcher form first, with the pre-0.55 dispatcher as a
+  # compatibility fallback. These calls never alter the user's Hyprland config.
+  hyprctl dispatch "hl.dsp.window.float({ action = \"on\", window = \"$window\" })" >/dev/null 2>&1 || \
+    hyprctl dispatch togglefloating "$window" >/dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.window.resize({ window = \"$window\", x = $target_width, y = $target_height })" >/dev/null 2>&1 || \
+    hyprctl dispatch resizewindowpixel "exact $target_width $target_height,$window" >/dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.window.move({ window = \"$window\", x = $target_x, y = $target_y })" >/dev/null 2>&1 || \
+    hyprctl dispatch movewindowpixel "exact $target_x $target_y,$window" >/dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.window.pin({ action = \"on\", window = \"$window\" })" >/dev/null 2>&1 || \
+    hyprctl dispatch pin "$window" >/dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.window.alter_zorder({ window = \"$window\", mode = \"top\" })" >/dev/null 2>&1 || \
+    hyprctl dispatch alterzorder top "$window" >/dev/null 2>&1 || true
+}
+
+rotate_log() {
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  if [[ -f $LOG_FILE ]] && (( $(stat -c %s "$LOG_FILE" 2>/dev/null || printf 0) > 1048576 )); then
+    mv -f "$LOG_FILE" "$LOG_FILE.1"
+  fi
+}
+
+launch_mpv() {
+  local dev="$1" busy vf_chain="lavfi=[setpts=PTS-STARTPTS]" pid
+  busy="$(device_busy_pids "$dev")"
+  if [[ -n $busy ]]; then
+    printf '%s: camera is busy: %s (PIDs: %s)\n' "$PROGRAM" "$dev" "$busy" >&2
+    return 1
+  fi
+  detect_v4l2_mode "$dev"
+  apply_launch_overrides
+  [[ $MIRROR == "true" ]] && vf_chain+=",hflip"
+  local -a args=(
+    "av://v4l2:$dev"
+    --no-config
+    "--input-ipc-server=$IPC"
+    --demuxer-lavf-format=v4l2
+    "--demuxer-lavf-o=video_size=$SIZE,framerate=$FPS,input_format=$FMT"
+    --profile=low-latency
+    --cache=no
+    --no-audio
+    --vd-lavc-threads=0
+    --force-window=yes
+    --keepaspect-window=yes
+    --panscan=1.0
+    "--vf=$vf_chain"
+    "--title=$WINDOW_TITLE"
+    "--wayland-app-id=$APP_ID"
+    "--x11-name=$APP_ID"
+    "--autofit=$WINDOW_SIZE"
+    --border=no
+    --focus-on=never
+  )
+  if [[ $LATENCY == "untimed" ]]; then
+    args+=(--untimed --video-sync=desync --framedrop=decoder+vo)
+  else
+    args+=(--video-sync=display-resample --framedrop=vo)
+  fi
+  rm -f "$IPC"
+  rotate_log
+  printf '\n[%s] start camera=%s format=%s size=%s fps=%s mirror=%s latency=%s\n' \
+    "$(date -Is)" "$dev" "$FMT" "$SIZE" "$FPS" "$MIRROR" "$LATENCY" >> "$LOG_FILE"
+  mpv "${args[@]}" 9>&- >> "$LOG_FILE" 2>&1 &
+  pid=$!
+  printf '%s\n' "$pid" > "$PID_FILE"
+  write_active "$dev" "$MIRROR" "$LATENCY"
+  best_effort_position "$pid" 9>&- &
+  for _ in {1..20}; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
+      printf '%s: mpv exited during startup; recent log:\n' "$PROGRAM" >&2
+      tail -n 15 "$LOG_FILE" >&2 || true
+      return 1
+    fi
+    [[ -S $IPC ]] && break
+    sleep 0.05
+  done
+  if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
+    return 1
+  fi
+  disown "$pid" 2>/dev/null || true
+  printf 'Started camera preview (%s).\n' "$dev"
+}
+
+stop_preview() {
+  local pid
+  pid="$(running_pid 2>/dev/null || true)"
+  if [[ -z $pid ]]; then
+    rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
+    printf 'Camera preview is already stopped.\n'
+    return
+  fi
+  kill "$pid" 2>/dev/null || true
+  for _ in {1..40}; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    printf '%s: preview did not stop cleanly (PID %s)\n' "$PROGRAM" "$pid" >&2
+    return 1
+  fi
+  rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
+  printf 'Stopped camera preview.\n'
+}
+
+choose_device() {
+  local -a cameras=()
+  local row dev stable index answer
+  while IFS= read -r row; do
+    IFS='|' read -r dev stable _ <<< "$row"
+    cameras+=("$stable")
+  done < <(camera_rows)
+  (( ${#cameras[@]} > 0 )) || { printf '%s: no camera devices found\n' "$PROGRAM" >&2; return 1; }
+  [[ -t 0 ]] || { printf '%s: --choose requires an interactive terminal\n' "$PROGRAM" >&2; return 1; }
+  printf 'Available cameras:\n' >&2
+  for ((index=0; index<${#cameras[@]}; index++)); do printf '  %d) %s\n' "$((index + 1))" "${cameras[index]}" >&2; done
+  read -r -p "Select [1-${#cameras[@]}] (Enter cancels): " answer
+  [[ -n $answer ]] || return 1
+  if [[ ! $answer =~ ^[0-9]+$ ]] || (( answer < 1 || answer > ${#cameras[@]} )); then
+    printf '%s: invalid selection\n' "$PROGRAM" >&2
+    return 1
+  fi
+  printf '%s\n' "${cameras[answer-1]}"
+}
+
+parse_launch_args() {
+  while (( $# > 0 )); do
+    case "$1" in
+      -c|--choose) CHOOSE="true" ;;
+      -m|--mirror) MIRROR="true"; MIRROR_EXPLICIT="true" ;;
+      --no-mirror) MIRROR="false"; MIRROR_EXPLICIT="true" ;;
+      --untimed) LATENCY="untimed"; LATENCY_EXPLICIT="true" ;;
+      --smooth) LATENCY="smooth"; LATENCY_EXPLICIT="true" ;;
+      --format|--size|--fps|--window-size)
+        (( $# >= 2 )) || die_usage "$1 requires a value"
+        case "$1" in
+          --format) OVERRIDE_FMT="$2" ;;
+          --size) OVERRIDE_SIZE="$2" ;;
+          --fps) OVERRIDE_FPS="$2" ;;
+          --window-size)
+            [[ $2 =~ ^[0-9]+x[0-9]+$ ]] || die_usage "invalid window size: $2"
+            WINDOW_SIZE="$2"
+            ;;
+        esac
+        shift
+        ;;
+      --) shift; break ;;
+      -*) die_usage "unknown launch option: $1" ;;
+      *) [[ -z $DEV ]] || die_usage "unexpected launch argument: $1"; DEV="$1" ;;
+    esac
+    shift
+  done
+  (( $# == 0 )) || die_usage "unexpected launch argument: $1"
+}
+
+start_preview() {
+  local preferred=""
+  if [[ -n $(running_pid 2>/dev/null || true) ]]; then
+    printf 'Camera preview is already running.\n'
+    return
+  fi
+  load_config
+  [[ $MIRROR_EXPLICIT == "true" ]] || MIRROR="$CONFIG_MIRROR"
+  [[ $LATENCY_EXPLICIT == "true" ]] || LATENCY="$CONFIG_LATENCY"
+  [[ $WINDOW_SIZE != "$DEFAULT_WINDOW_SIZE" || -n ${CAM_STREAM_WINDOW_SIZE:-} ]] || WINDOW_SIZE="$CONFIG_WINDOW_SIZE"
+  if [[ $MIRROR_EXPLICIT == "true" || $LATENCY_EXPLICIT == "true" || $WINDOW_SIZE != "$CONFIG_WINDOW_SIZE" ]]; then
+    [[ $MIRROR_EXPLICIT == "true" ]] && CONFIG_MIRROR="$MIRROR"
+    [[ $LATENCY_EXPLICIT == "true" ]] && CONFIG_LATENCY="$LATENCY"
+    CONFIG_WINDOW_SIZE="$WINDOW_SIZE"
+    write_config
+  fi
+  if [[ $CHOOSE == "true" ]]; then
+    DEV="$(choose_device)"
+  elif [[ -n $DEV ]]; then
+    DEV="$(camera_resolve_target "$DEV")"
+  else
+    preferred="$(preferred_camera 2>/dev/null || true)"
+    if [[ -n $preferred && -e $preferred ]]; then DEV="$preferred"; else DEV="$(camera_first_capture 2>/dev/null || true)"; fi
+  fi
+  [[ -n $DEV && -e $DEV ]] || { printf '%s: no usable camera found; run: cam-stream camera list\n' "$PROGRAM" >&2; return 1; }
+  launch_mpv "$DEV"
+}
+
+with_lock() {
+  command -v flock >/dev/null 2>&1 || { printf '%s: required command not found: flock\n' "$PROGRAM" >&2; return 1; }
+  exec 9> "$LOCK_FILE"
+  if ! flock -n 9; then
+    printf '%s: another control operation is already in progress\n' "$PROGRAM" >&2
+    return 1
+  fi
+  "$@"
+}
+
+doctor_command() {
+  local target="" json="false" failures=0 warnings=0 command state detail first="true"
+  while (( $# > 0 )); do
+    case "$1" in --json) json="true" ;; -*) die_usage "unknown doctor option: $1" ;; *) [[ -z $target ]] || die_usage "unexpected doctor argument: $1"; target="$1" ;; esac
+    shift
+  done
+  local -a checks=()
+  for command in bash mpv v4l2-ctl flock; do
+    if command -v "$command" >/dev/null 2>&1; then state="pass"; detail="found $(command -v "$command")"; else state="fail"; detail="required command not found"; ((failures += 1)); fi
+    checks+=("$command|$state|$detail")
+  done
+  if command -v hyprctl >/dev/null 2>&1; then
+    checks+=("hyprctl|pass|found $(command -v hyprctl)")
+  else
+    checks+=("hyprctl|warn|not found; preview still works without automatic positioning")
+    ((warnings += 1))
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    checks+=("jq|pass|found $(command -v jq)")
+  else
+    checks+=("jq|warn|not found; preview still works without automatic positioning")
+    ((warnings += 1))
+  fi
+  local -a rows=()
+  mapfile -t rows < <(camera_rows)
+  if (( ${#rows[@]} > 0 )); then checks+=("cameras|pass|${#rows[@]} visible device node(s)"); else checks+=("cameras|fail|no camera device nodes found"); ((failures += 1)); fi
+  if [[ -n $target ]]; then
+    if camera_resolve_target "$target" >/dev/null 2>&1; then checks+=("target|pass|camera target resolved"); else checks+=("target|fail|camera target did not resolve"); ((failures += 1)); fi
+  fi
+  if [[ $json == "true" ]]; then
+    printf '{"schemaVersion":1,"ok":%s,"failures":%d,"warnings":%d,"checks":[' "$([[ $failures == 0 ]] && printf true || printf false)" "$failures" "$warnings"
+    for detail in "${checks[@]}"; do
+      IFS='|' read -r command state target <<< "$detail"
+      [[ $first == "true" ]] || printf ','; first="false"
+      printf '{"name":"%s","status":"%s","detail":"%s"}' "$(json_escape "$command")" "$state" "$(json_escape "$target")"
+    done
+    printf ']}\n'
+  else
+    printf 'Cam Stream doctor\n'
+    for detail in "${checks[@]}"; do IFS='|' read -r command state target <<< "$detail"; printf '  %-5s %-12s %s\n' "$state" "$command" "$target"; done
+  fi
+  (( failures == 0 ))
+}
+
+camera_diagnose_command() {
+  local target="${1:-}" dev info role busy
+  (( $# <= 1 )) || die_usage "camera diagnose accepts at most one target"
+  if [[ -n $target ]]; then dev="$(camera_resolve_target "$target")"; else dev="$(preferred_camera 2>/dev/null || camera_first_capture 2>/dev/null || true)"; fi
+  [[ -n $dev && -e $dev ]] || { printf '%s: no valid camera available to diagnose\n' "$PROGRAM" >&2; return 1; }
+  info="$(v4l2-ctl -d "$dev" --all 2>&1 || true)"
+  role="$(camera_role_from_info "$info")"
+  busy="$(device_busy_pids "$dev")"
+  printf 'Camera diagnose\nDevice: %s\nRole: %s\nBusy PIDs: %s\n\nCapabilities:\n' "$dev" "$role" "${busy:--}"
+  sed -n '1,80p' <<< "$info"
+  printf '\nFormats:\n'
+  v4l2-ctl -d "$dev" --list-formats-ext 2>&1 | sed -n '1,120p'
+}
+
+camera_show_command() {
+  load_config
+  case "${1:-}" in
+    "") printf 'Preferred camera: %s\nCard: %s\nBus: %s\n' "${CONFIG_CAMERA:-<none>}" "${CONFIG_CARD:-<none>}" "${CONFIG_BUS:-<none>}" ;;
+    --json)
+      printf '{"schemaVersion":1,"camera":'; json_string_or_null "$CONFIG_CAMERA"
+      printf ',"card":'; json_string_or_null "$CONFIG_CARD"
+      printf ',"bus":'; json_string_or_null "$CONFIG_BUS"
+      printf '}\n'
+      ;;
+    *) die_usage "unexpected camera show argument: $1" ;;
+  esac
+}
+
+logs_command() {
+  local lines="${1:-80}"
+  (( $# <= 1 )) || die_usage "logs accepts at most one line count"
+  if [[ ! $lines =~ ^[0-9]+$ ]] || (( lines <= 0 )); then
+    die_usage "log line count must be a positive integer"
+  fi
+  if [[ -f $LOG_FILE ]]; then tail -n "$lines" "$LOG_FILE"; else printf 'No runtime log yet (%s).\n' "$LOG_FILE"; fi
+}
+
+main() {
+  local command="${1:-toggle}" legacy_restart="false"
+  if (( $# > 0 )); then shift; fi
+  case "$command" in
+    -h|--help|help) usage ;;
+    --version|version) printf '%s %s\n' "$PROGRAM" "$VERSION" ;;
+    status|--status) status_command "$@" ;;
+    logs|log) logs_command "$@" ;;
+    doctor|diagnose|troubleshoot) doctor_command "$@" ;;
+    camera)
+      local subcommand="${1:-help}"
+      (( $# > 0 )) && shift
+      case "$subcommand" in
+        list|ls) camera_list_command "$@" ;;
+        select) camera_select_command "$@" ;;
+        show|current) camera_show_command "$@" ;;
+        diagnose|doctor|troubleshoot) camera_diagnose_command "$@" ;;
+        help|-h|--help) printf 'Camera commands: list, select, show, diagnose\n' ;;
+        *) die_usage "unknown camera command: $subcommand" ;;
+      esac
+      ;;
+    settings)
+      local subcommand="${1:-show}"
+      (( $# > 0 )) && shift
+      case "$subcommand" in show) settings_show "$@" ;; set) settings_set "$@" ;; *) die_usage "unknown settings command: $subcommand" ;; esac
+      ;;
+    start)
+      parse_launch_args "$@"
+      with_lock start_preview
+      ;;
+    stop)
+      (( $# == 0 )) || die_usage "stop does not accept arguments"
+      with_lock stop_preview
+      ;;
+    restart)
+      parse_launch_args "$@"
+      with_lock stop_preview >/dev/null
+      with_lock start_preview
+      ;;
+    toggle)
+      parse_launch_args "$@"
+      if [[ -n $(running_pid 2>/dev/null || true) ]]; then with_lock stop_preview; else with_lock start_preview; fi
+      ;;
+    -l|--list)
+      (( $# == 0 )) || die_usage "$command does not accept arguments"
+      camera_list_human
+      ;;
+    -*)
+      # Preserve the old option-led toggle form, including --restart.
+      local -a launch_args=("$command" "$@") filtered=() arg
+      for arg in "${launch_args[@]}"; do
+        if [[ $arg == "--restart" ]]; then legacy_restart="true"; else filtered+=("$arg"); fi
+      done
+      parse_launch_args "${filtered[@]}"
+      if [[ $legacy_restart == "true" ]]; then
+        with_lock stop_preview >/dev/null
+        with_lock start_preview
+      elif [[ -n $(running_pid 2>/dev/null || true) ]]; then
+        with_lock stop_preview
+      else
+        with_lock start_preview
+      fi
+      ;;
+    /*)
+      # Preserve `cam-stream /dev/videoN` as a toggle for that camera. Named
+      # matches remain available through the explicit start/toggle commands.
+      parse_launch_args "$command" "$@"
+      if [[ -n $(running_pid 2>/dev/null || true) ]]; then with_lock stop_preview; else with_lock start_preview; fi
+      ;;
+    *) die_usage "unknown command: $command" ;;
+  esac
+}
+
+main "$@"
