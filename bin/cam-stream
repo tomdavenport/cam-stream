@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="cam-stream"
-VERSION="1.0.1"
+VERSION="1.0.2"
 APP_ID="io.github.tomdavenport.cam-stream"
 WINDOW_TITLE="Cam Stream Camera Preview"
 
@@ -200,6 +200,9 @@ load_active() {
   ACTIVE_CAMERA=""
   ACTIVE_MIRROR=""
   ACTIVE_LATENCY=""
+  ACTIVE_FORMAT=""
+  ACTIVE_SIZE=""
+  ACTIVE_FPS=""
   [[ -r $ACTIVE_FILE ]] || return 0
   local key value
   while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
@@ -207,6 +210,9 @@ load_active() {
       camera) ACTIVE_CAMERA="$value" ;;
       mirror) ACTIVE_MIRROR="$value" ;;
       latency) ACTIVE_LATENCY="$value" ;;
+      format) ACTIVE_FORMAT="$value" ;;
+      size) ACTIVE_SIZE="$value" ;;
+      fps) ACTIVE_FPS="$value" ;;
     esac
   done < "$ACTIVE_FILE"
 }
@@ -220,6 +226,9 @@ write_active() {
       printf 'camera=%s\n' "$1"
       printf 'mirror=%s\n' "$2"
       printf 'latency=%s\n' "$3"
+      printf 'format=%s\n' "$4"
+      printf 'size=%s\n' "$5"
+      printf 'fps=%s\n' "$6"
     } > "$tmp"
   )
   mv -f "$tmp" "$ACTIVE_FILE"
@@ -534,6 +543,7 @@ running_pid() {
 
 status_command() {
   local json="false" pid="" running="false" ipc_state="absent" preferred="" camera="" mirror latency
+  local capture_format="" capture_size="" capture_fps=""
   case "${1:-}" in "") ;; --json) json="true" ;; *) die_usage "unexpected status argument: $1" ;; esac
   load_config
   pid="$(running_pid 2>/dev/null || true)"
@@ -550,6 +560,9 @@ status_command() {
     camera="$ACTIVE_CAMERA"
     [[ -n $ACTIVE_MIRROR ]] && mirror="$ACTIVE_MIRROR"
     [[ -n $ACTIVE_LATENCY ]] && latency="$ACTIVE_LATENCY"
+    capture_format="$ACTIVE_FORMAT"
+    capture_size="$ACTIVE_SIZE"
+    capture_fps="$ACTIVE_FPS"
   fi
   if [[ $json == "true" ]]; then
     printf '{"schemaVersion":1,"running":%s,"pid":' "$running"
@@ -558,13 +571,21 @@ status_command() {
     json_string_or_null "$camera"
     printf ',"preferredCamera":'
     json_string_or_null "$preferred"
-    printf ',"mirror":%s,"latencyMode":"%s","appId":"%s","title":"%s"}\n' \
-      "$mirror" "$latency" "$APP_ID" "$WINDOW_TITLE"
+    printf ',"mirror":%s,"latencyMode":"%s","captureFormat":' "$mirror" "$latency"
+    json_string_or_null "$capture_format"
+    printf ',"captureSize":'
+    json_string_or_null "$capture_size"
+    printf ',"captureFps":'
+    json_string_or_null "$capture_fps"
+    printf ',"appId":"%s","title":"%s"}\n' "$APP_ID" "$WINDOW_TITLE"
   else
     if [[ $running == "true" ]]; then printf 'Preview: running (PID %s)\n' "$pid"; else printf 'Preview: stopped\n'; fi
     printf 'IPC: %s (%s)\n' "$ipc_state" "$IPC"
     printf 'Camera: %s\n' "${camera:-${preferred:-auto}}"
     printf 'Mirror: %s\nLatency: %s\nLog: %s\n' "$mirror" "$latency" "$LOG_FILE"
+    if [[ -n $capture_format || -n $capture_size || -n $capture_fps ]]; then
+      printf 'Capture: %s %s @ %s fps\n' "${capture_format:-?}" "${capture_size:-?}" "${capture_fps:-?}"
+    fi
   fi
 }
 
@@ -673,12 +694,15 @@ launch_mpv() {
     "av://v4l2:$dev"
     --no-config
     "--input-ipc-server=$IPC"
-    --demuxer-lavf-format=v4l2
-    "--demuxer-lavf-o=video_size=$SIZE,framerate=$FPS,input_format=$FMT"
     --profile=low-latency
+    --demuxer-lavf-format=v4l2
+    "--demuxer-lavf-o-add=video_size=$SIZE"
+    "--demuxer-lavf-o-add=framerate=$FPS"
+    "--demuxer-lavf-o-add=input_format=$FMT"
     --cache=no
     --no-audio
-    --vd-lavc-threads=0
+    --hwdec=no
+    --vd-lavc-threads=1
     --force-window=yes
     --keepaspect-window=yes
     --panscan=1.0
@@ -691,7 +715,7 @@ launch_mpv() {
     --focus-on=never
   )
   if [[ $LATENCY == "untimed" ]]; then
-    args+=(--untimed --video-sync=desync --framedrop=decoder+vo)
+    args+=(--untimed)
   else
     args+=(--video-sync=display-resample --framedrop=vo)
   fi
@@ -702,7 +726,7 @@ launch_mpv() {
   mpv "${args[@]}" 9>&- >> "$LOG_FILE" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
-  write_active "$dev" "$MIRROR" "$LATENCY"
+  write_active "$dev" "$MIRROR" "$LATENCY" "$FMT" "$SIZE" "$FPS"
   best_effort_position "$pid" 9>&- &
   for _ in {1..20}; do
     if ! kill -0 "$pid" 2>/dev/null; then

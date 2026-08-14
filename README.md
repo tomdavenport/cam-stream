@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>A native, one-click camera preview for Omarchy 4 / Quattro.</strong><br>
-  Open a low-latency floating preview, switch inputs, mirror the image, and get
+  Open a realtime floating preview, switch inputs, mirror the image, and get
   back to work.
 </p>
 
@@ -24,7 +24,8 @@
 
 Cam Stream puts a camera-preview control in the Omarchy bar. Left click the
 camera icon to start or stop the preview. Right click it to choose a camera,
-mirror the picture, or trade lower latency for smoother playback.
+mirror the picture, or deliberately trade realtime response for smoother
+playback.
 
 The widget follows the active Omarchy theme and shows distinct live, stopped,
 error, and no-camera states. Its camera helper is bundled in this repository;
@@ -151,6 +152,11 @@ The selected camera, mirror preference, and latency preference persist in Cam
 Stream's own XDG configuration directory. Changing the camera or playback mode
 while the preview is live restarts that preview so the change takes effect.
 
+**Realtime (no buffer)** is the default and follows mpv's low-latency V4L2
+path. **Smoother (adds latency)** is an explicit opt-in for steadier frame
+pacing. Automatic camera discovery pauses while the preview is live so the bar
+never repeatedly probes the active capture device; status checks continue.
+
 The bundled command also works directly:
 
 ```bash
@@ -261,6 +267,22 @@ ignores nodes identified as metadata-only. Reconnect the camera, press **R**
 in the panel, and check that your login session has read and write access to
 the relevant `/dev/video*` device. Fix device access through the system's
 udev/logind policy rather than making the device world-writable.
+
+### The preview feels delayed
+
+Switch back to the realtime path and inspect the mode Cam Stream actually
+opened:
+
+```bash
+"$cam_stream" restart --untimed
+"$cam_stream" status
+```
+
+`status` reports the active camera plus its capture format, size, and frame
+rate. A camera opened at a low frame rate can feel delayed even when the player
+is not buffering. If delay remains, send the `status` output and the final
+`start camera=...` line from `"$cam_stream" logs 20`; those contain no image or
+video data and make device-specific problems reproducible.
 
 ### The camera is busy
 
