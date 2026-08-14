@@ -142,11 +142,13 @@ setup_case() {
   CAM_STREAM_JQ_BIN="$(command -v jq)"
   export CAM_STREAM_JQ_BIN
   export CAM_STREAM_SLURP_BIN="$STUB_BIN/slurp"
+  export CAM_STREAM_XDG_USER_DIR_BIN="$STUB_BIN/missing-xdg-user-dir"
   export CAM_STREAM_OUTPUT_DIR="$CASE_ROOT/videos"
   unset CAM_STREAM_CAMERA CAM_STREAM_WINDOW_SIZE HYPRLAND_INSTANCE_SIGNATURE
   unset CAM_STREAM_CAPTURE_TARGET
   unset CAM_STREAM_STUDIO_FAIL_GSR CAM_STREAM_STUDIO_FAIL_GSR_CLI
   unset CAM_STREAM_STUDIO_FAIL_SECRET CAM_STREAM_STUDIO_FAIL_FFMPEG
+  unset CAM_STREAM_STUDIO_SKIP_RECORD_OUTPUT
 
   # Camera discovery remains isolated from the host's /dev and udev state.
   # shellcheck disable=SC2016
@@ -290,7 +292,7 @@ case "$command" in
     [[ ${CAM_STREAM_STUDIO_FAIL_GSR_CLI:-false} != stop ]] || exit 56
     output=""
     [[ -r ${CAM_STREAM_STUDIO_STUB_OUTPUT:?} ]] && read -r output < "${CAM_STREAM_STUDIO_STUB_OUTPUT:?}" || true
-    if [[ -n $output && $output != *://* ]]; then
+    if [[ -n $output && $output != *://* && ${CAM_STREAM_STUDIO_SKIP_RECORD_OUTPUT:-false} != true ]]; then
       mkdir -p "$(dirname "$output")"
       printf "fake recording\n" > "$output"
     fi
@@ -564,12 +566,59 @@ for capture_mode in fullscreen window region; do
   $CAM_STREAM record stop >/dev/null
 done
 
+# A user-dirs file is data, not shell code; malformed content falls back safely.
+setup_case
+unset CAM_STREAM_OUTPUT_DIR XDG_VIDEOS_DIR
+user_dirs_marker="$CASE_ROOT/user-dirs-was-executed"
+# shellcheck disable=SC2016 # Command substitution belongs to the malicious fixture.
+printf 'XDG_VIDEOS_DIR="$(touch %s)"\n' "$user_dirs_marker" > "$XDG_CONFIG_HOME/user-dirs.dirs"
+export CAM_STREAM_CAPTURE_TARGET='monitor:DP-TEST'
+$CAM_STREAM record start >/dev/null
+assert_file_contains "$CAM_STREAM_STUDIO_GSR_LOG" "$HOME/Videos/cam-stream-recording-" "malicious user-dirs content falls back to HOME/Videos"
+if [[ ! -e $user_dirs_marker ]]; then
+  pass "user-dirs content is never sourced or executed"
+else
+  fail "user-dirs content is never sourced or executed"
+fi
+$CAM_STREAM record stop >/dev/null
+
 # X requires encrypted RTMPS; custom destinations may deliberately use RTMP.
 setup_case
 status=0
 reject_output="$(printf '%s\n' 'reject-me' | "$CAM_STREAM" live configure x --server 'rtmp://x.example.test/live' --key-stdin 2>&1)" || status=$?
 if (( status != 0 )); then pass "X rejects an unencrypted RTMP server"; else fail "X rejects an unencrypted RTMP server"; fi
 assert_not_contains "$reject_output" 'reject-me' "rejected X configuration never echoes the key"
+
+# Server URLs must be structural endpoints, never credential or option carriers.
+malicious_profiles=(x custom x)
+malicious_servers=(
+  'rtmps://user@x.example.test/live'
+  'rtmp://custom.example.test/live?token=unsafe'
+  'rtmps://x.example.test/live#fragment'
+)
+malicious_labels=('userinfo' 'query string' 'fragment')
+for index in "${!malicious_servers[@]}"; do
+  setup_case
+  malicious_key="server-validation-secret-$index"
+  status=0
+  malicious_output="$(printf '%s\n' "$malicious_key" | "$CAM_STREAM" live configure "${malicious_profiles[index]}" --server "${malicious_servers[index]}" --key-stdin 2>&1)" || status=$?
+  assert_eq 2 "$status" "live server rejects ${malicious_labels[index]}"
+  assert_not_contains "$malicious_output" "$malicious_key" "${malicious_labels[index]} rejection never echoes the key"
+  assert_not_contains "$malicious_output" "${malicious_servers[index]}" "${malicious_labels[index]} rejection never echoes the server"
+  assert_file_not_contains "$XDG_CONFIG_HOME/cam-stream/config" "${malicious_servers[index]}" "${malicious_labels[index]} server is not persisted"
+done
+
+# Keys are opaque single tokens; surrounding or embedded whitespace is rejected.
+whitespace_keys=(' leading-whitespace-secret' 'trailing-whitespace-secret ' $'internal\twhitespace-secret')
+for whitespace_key in "${whitespace_keys[@]}"; do
+  setup_case
+  status=0
+  whitespace_output="$(printf '%s\n' "$whitespace_key" | "$CAM_STREAM" live configure x --server 'rtmps://x.example.test/live' --key-stdin 2>&1)" || status=$?
+  assert_eq 1 "$status" "stream key whitespace is rejected"
+  assert_not_contains "$whitespace_output" 'whitespace-secret' "whitespace rejection never echoes key material"
+  settings_json="$($CAM_STREAM activity settings --json)"
+  assert_json_eq "$settings_json" '.profiles.x.configured' 'false' "rejected whitespace key does not configure X"
+done
 
 custom_key='custom-secret-42'
 custom_output="$(configure_live custom 'rtmp://custom.example.test/live' "$custom_key")"
@@ -584,6 +633,18 @@ $CAM_STREAM live stop >/dev/null
 $CAM_STREAM live clear custom >/dev/null
 settings_json="$($CAM_STREAM activity settings --json)"
 assert_json_eq "$settings_json" '.profiles.custom.configured' 'false' "clearing custom removes its saved credential"
+
+# Clearing a profile clears its non-secret server even if Secret Service vanished.
+setup_case
+configure_live x 'rtmps://x.example.test/live' 'clear-without-keyring-secret' >/dev/null
+assert_file_contains "$XDG_CONFIG_HOME/cam-stream/config" 'live_server_x=rtmps://x.example.test/live' "configured X server is present before clear"
+export CAM_STREAM_SECRET_TOOL_BIN="$STUB_BIN/missing-secret-tool"
+status=0
+clear_output="$($CAM_STREAM live clear x 2>&1)" || status=$?
+assert_eq 0 "$status" "live clear succeeds when Secret Service is unavailable"
+assert_not_contains "$clear_output" 'clear-without-keyring-secret' "keyring-unavailable clear never echoes the key"
+assert_file_contains "$XDG_CONFIG_HOME/cam-stream/config" 'live_server_x=' "keyring-unavailable clear writes an empty X server"
+assert_file_not_contains "$XDG_CONFIG_HOME/cam-stream/config" 'x.example.test' "keyring-unavailable clear removes the X server value"
 
 # A keyring failure is fatal and never falls back to plaintext configuration.
 setup_case
@@ -675,6 +736,23 @@ if (( status != 0 )); then pass "a failed live remux is reported"; else fail "a 
 assert_contains "${remux_output,,}" 'flv' "remux failure reports the recovery format"
 flv_output="$(find_output '.flv')"
 if [[ -n $flv_output && -s $flv_output ]]; then pass "failed remux preserves the FLV recovery file"; else fail "failed remux preserves the FLV recovery file"; fi
+
+# A successful IPC stop is not a successful recording unless the MP4 exists.
+setup_case
+export CAM_STREAM_CAPTURE_TARGET='monitor:DP-TEST'
+$CAM_STREAM record start >/dev/null
+expected_recording="$(json_value "$($CAM_STREAM record status --json)" '.outputPath')"
+export CAM_STREAM_STUDIO_SKIP_RECORD_OUTPUT=true
+status=0
+missing_recording_output="$($CAM_STREAM record stop 2>&1)" || status=$?
+if (( status != 0 )); then pass "record stop fails when GSR creates no MP4"; else fail "record stop fails when GSR creates no MP4"; fi
+assert_not_contains "$missing_recording_output" 'Saved recording' "missing MP4 is never reported as saved"
+assert_contains "${missing_recording_output,,}" 'record' "missing MP4 failure is explained"
+if [[ ! -e $expected_recording ]]; then pass "missing MP4 remains absent"; else fail "missing MP4 remains absent"; fi
+activity_json="$($CAM_STREAM record status --json)"
+assert_json_eq "$activity_json" '.running' 'false' "missing MP4 clears active recorder state"
+assert_json_eq "$activity_json" '.state' 'error' "missing MP4 remains visible as an activity error"
+assert_json_eq "$activity_json" '.error != null and (.error | length > 0)' 'true' "missing MP4 stores a diagnostic"
 
 # An unrelated GSR process blocks startup and is never signalled or stopped.
 setup_case
