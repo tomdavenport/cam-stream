@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.tomdavenport.cam-stream",
   "name": "Cam Stream",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "author": "Tom Davenport",
   "license": "MIT",
   "description": "A camera-preview toggle and control panel for the Omarchy Quattro bar.",

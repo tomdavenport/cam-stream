@@ -24,6 +24,9 @@ BarWidget {
   property string preferredCamera: ""
   property bool mirrorEnabled: false
   property string latencyMode: "untimed"
+  property string captureFormat: ""
+  property string captureSize: ""
+  property string captureFps: ""
   property var cameras: []
   property int cameraRevision: 0
   property string cameraChoice: ""
@@ -110,8 +113,12 @@ BarWidget {
   }
 
   function runningDetail() {
-    var mode = root.latencyMode === "smooth" ? "smooth playback" : "lowest latency"
-    return root.cameraName(root.activeCamera) + " · " + mode + (root.mirrorEnabled ? " · mirrored" : "")
+    var mode = root.latencyMode === "smooth" ? "smooth playback" : "realtime"
+    var capture = root.captureSize
+      ? " · " + root.captureSize + (root.captureFps ? "@" + root.captureFps : "")
+      : ""
+    return root.cameraName(root.activeCamera) + " · " + mode + capture
+      + (root.mirrorEnabled ? " · mirrored" : "")
   }
 
   function tooltipForState() {
@@ -169,6 +176,12 @@ BarWidget {
       ? "" : String(data.preferredCamera)
     root.mirrorEnabled = data.mirror === true
     root.latencyMode = String(data.latencyMode || "untimed") === "smooth" ? "smooth" : "untimed"
+    root.captureFormat = data.captureFormat === null || data.captureFormat === undefined
+      ? "" : String(data.captureFormat)
+    root.captureSize = data.captureSize === null || data.captureSize === undefined
+      ? "" : String(data.captureSize)
+    root.captureFps = data.captureFps === null || data.captureFps === undefined
+      ? "" : String(data.captureFps)
     root.statusLoaded = true
     root.clearError("status")
     Qt.callLater(root.syncCameraChoice)
@@ -226,6 +239,10 @@ BarWidget {
     root.broadcast("refresh")
   }
 
+  function refreshStatusEverywhere() {
+    root.broadcast("refreshStatus")
+  }
+
   function runActions(sequence) {
     if (root.actionBusy || !sequence || sequence.length === 0) return
     var queued = []
@@ -238,7 +255,7 @@ BarWidget {
     if (actionProc.running || root.currentAction.length > 0) return
     if (root.actionQueue.length === 0) {
       root.clearError("action")
-      root.refreshEverywhere()
+      root.refreshStatusEverywhere()
       return
     }
 
@@ -258,7 +275,7 @@ BarWidget {
       root.actionQueue = []
       root.setError("action", root.actionStderr || root.actionStdout
         || ("Command failed: " + failedAction.join(" ")))
-      root.refreshEverywhere()
+      root.refreshStatusEverywhere()
       return
     }
     root.runNextAction()
@@ -297,7 +314,8 @@ BarWidget {
 
   function open(payloadJson) {
     root.opened = true
-    root.refresh()
+    root.refreshStatus()
+    if (!root.streamRunning) root.refreshCameras()
   }
 
   function close() {
@@ -408,7 +426,7 @@ BarWidget {
 
   Timer {
     interval: root.opened ? 6000 : 12000
-    running: true
+    running: root.statusLoaded && !root.streamRunning
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refreshCameras()
@@ -627,8 +645,8 @@ BarWidget {
           label: "Latency"
           value: root.latencyMode
           options: [
-            { value: "untimed", label: "Lowest latency" },
-            { value: "smooth", label: "Smoother playback" }
+            { value: "untimed", label: "Realtime (no buffer)" },
+            { value: "smooth", label: "Smoother (adds latency)" }
           ]
           foreground: Color.popups.text
           fontFamily: root.bar ? root.bar.fontFamily : Style.font.family

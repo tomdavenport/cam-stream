@@ -33,6 +33,11 @@ assert_contains() {
   if [[ $haystack == *"$needle"* ]]; then pass "$message"; else fail "$message (missing '$needle')"; fi
 }
 
+assert_not_contains() {
+  local haystack="$1" needle="$2" message="$3"
+  if [[ $haystack != *"$needle"* ]]; then pass "$message"; else fail "$message (unexpected '$needle')"; fi
+}
+
 assert_status() {
   local expected="$1" message="$2"
   shift 2
@@ -156,6 +161,28 @@ assert_status 1 "automatic selection never launches a metadata-only node" "$CAM_
 
 setup_case
 : > "$DEV_DIR/video0"
+output="$($CAM_STREAM start)"
+assert_contains "$output" 'Started camera preview' "fresh start launches the preview"
+pid="$(<"$XDG_STATE_HOME/cam-stream/cam-stream.pid")"
+cmdline="$(tr '\0' '\n' < "/proc/$pid/cmdline")"
+assert_contains "$cmdline" '--profile=low-latency' "fresh start uses mpv's low-latency profile"
+assert_contains "$cmdline" '--untimed' "fresh start uses realtime untimed playback"
+assert_contains "$cmdline" '--vd-lavc-threads=1' "realtime playback avoids decoder frame-thread queues"
+assert_contains "$cmdline" '--hwdec=no' "realtime playback avoids hardware copy-back queues"
+assert_contains "$cmdline" '--demuxer-lavf-o-add=video_size=1280x720' "capture size is added without replacing low-latency demuxer options"
+assert_contains "$cmdline" '--demuxer-lavf-o-add=framerate=30' "capture frame rate is added without replacing low-latency demuxer options"
+assert_contains "$cmdline" '--demuxer-lavf-o-add=input_format=mjpeg' "capture format is added without replacing low-latency demuxer options"
+assert_not_contains "$cmdline" '--demuxer-lavf-o=' "capture options do not reset mpv's no-buffer demuxer profile"
+assert_not_contains "$cmdline" '--video-sync=desync' "realtime playback avoids mpv's testing-only desync mode"
+assert_not_contains "$cmdline" '--framedrop=decoder+vo' "realtime playback avoids decoder frame-drop heuristics"
+status_json="$($CAM_STREAM status --json)"
+assert_contains "$status_json" '"captureFormat":"mjpeg"' "running status reports the capture format"
+assert_contains "$status_json" '"captureSize":"1280x720"' "running status reports the capture size"
+assert_contains "$status_json" '"captureFps":"30"' "running status reports the capture frame rate"
+$CAM_STREAM stop >/dev/null
+
+setup_case
+: > "$DEV_DIR/video0"
 output="$($CAM_STREAM settings set mirror true)"
 assert_contains "$output" 'Saved mirror=true' "mirror setting is accepted"
 $CAM_STREAM settings set latency smooth >/dev/null
@@ -244,6 +271,11 @@ assert_status 2 "unknown command returns usage status" "$CAM_STREAM" wat
 assert_status 2 "missing option value returns usage status" "$CAM_STREAM" start --fps
 assert_status 2 "invalid setting returns usage status" "$CAM_STREAM" settings set mirror maybe
 assert_status 2 "invalid log count returns usage status" "$CAM_STREAM" logs zero
+
+widget_source="$(<"$ROOT/BarWidget.qml")"
+assert_contains "$widget_source" 'running: root.statusLoaded && !root.streamRunning' "widget suspends automatic camera probing while streaming"
+assert_contains "$widget_source" 'root.refreshStatusEverywhere()' "completed actions refresh status without reprobeing cameras"
+assert_contains "$widget_source" 'Smoother (adds latency)' "widget labels the smoother mode's latency tradeoff"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 (( FAIL == 0 ))

@@ -2,6 +2,15 @@
 
 All notable changes to Cam Stream are documented here.
 
+## 1.0.2 — 2026-08-14
+
+- Stop automatically probing V4L2 devices while a preview is live, avoiding
+  recurring camera-driver contention and CPU spikes from each bar instance.
+- Follow mpv's documented realtime V4L2 path, including a single decoder
+  thread and additive device options that preserve its no-buffer profile.
+- Make the smoother mode's latency tradeoff explicit in the control panel.
+- Report the active capture format, size, and frame rate in runtime status.
+
 ## 1.0.1 — 2026-08-13
 
 - Document standalone Arch Linux installation separately from the Omarchy
