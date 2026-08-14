@@ -1379,7 +1379,7 @@ live_clear_command() {
 }
 
 live_start_command() {
-  local profile="" local_copy="" server="" key="" stream_url="" output_dir output=""
+  local profile="" local_copy="" server="" key="" stream_url="" output_dir output="" live_suffix=""
   while (( $# > 0 )); do
     case "$1" in
       x|custom) [[ -z $profile ]] || die_usage "live start accepts only one destination"; profile="$1" ;;
@@ -1457,7 +1457,8 @@ live_start_command() {
       return 1
     fi
   fi
-  printf 'Sending to %s%s.\n' "$profile" "$([[ $local_copy == "true" ]] && printf ' with local recording' || true)"
+  [[ $local_copy == "true" ]] && live_suffix=" with local recording"
+  printf 'Sending to %s%s.\n' "$profile" "$live_suffix"
 }
 
 record_pause_state_command() {
@@ -1479,7 +1480,7 @@ record_pause_state_command() {
 }
 
 record_stop_command() {
-  local pid output error=""
+  local pid output error="" last_output=""
   (( $# == 0 )) || die_usage "record stop does not accept arguments"
   refresh_activity_runtime
   pid="$(activity_running_pid 2>/dev/null || true)"
@@ -1502,7 +1503,8 @@ record_stop_command() {
     error="Recording stopped, but the expected MP4 is empty."
   fi
   if [[ -n $error ]]; then
-    write_activity_last record "$([[ -f $output ]] && printf '%s' "$output" || true)" "$error"
+    [[ -f $output ]] && last_output="$output"
+    write_activity_last record "$last_output" "$error"
     activity_log "stop mode=record output_saved=false"
     printf '%s: %s Expected path: %s\n' "$PROGRAM" "$error" "$output" >&2
     return 1
