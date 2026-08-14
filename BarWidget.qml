@@ -180,7 +180,7 @@ BarWidget {
   }
 
   function destinationLabel(value) {
-    return String(value || "x").toLowerCase() === "custom" ? "Custom RTMPS" : "X"
+    return String(value || "x").toLowerCase() === "custom" ? "Custom RTMP(S)" : "X"
   }
 
   function panelHasError() {
@@ -214,7 +214,7 @@ BarWidget {
       return root.formatElapsed(root.activityElapsedSeconds) + copy
     }
     if (root.selectedTab === "record")
-      return "Uses Omarchy's capture picker and records at native quality."
+      return "Uses Omarchy's capture picker with the " + root.qualityMode + " quality preset."
     if (root.selectedProfileConfigured)
       return root.destinationLabel(root.liveDestination) + " is configured · " + root.qualityMode
     return "Paste the RTMPS server and stream key supplied by your platform."
@@ -257,7 +257,7 @@ BarWidget {
     if (root.activityErrorMessage) return "Cam Stream activity error · " + root.activityErrorMessage + " · Right click for details"
     if (root.hasError) return "Cam Stream error · " + root.errorMessage + " · Right click for details"
     if (root.noCamera) return "Cam Stream · No camera found · Right click for settings"
-    if (root.streamRunning) return "Cam Stream · Camera on " + root.cameraName(root.activeCamera) + " · Left click to stop"
+    if (root.stateName === "running") return "Cam Stream · Camera on " + root.cameraName(root.activeCamera) + " · Left click to stop"
     return "Cam Stream · Stopped · Left click to start · Right click for settings"
   }
 
@@ -1162,6 +1162,21 @@ BarWidget {
               enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
               onChanged: function(value) { root.setActivitySetting("audio", value) }
             }
+
+            Dropdown {
+              width: parent.width
+              label: "Video quality"
+              value: root.qualityMode
+              options: [
+                { value: "720p30", label: "720p · 30 fps · 6 Mbps" },
+                { value: "1080p30", label: "1080p · 30 fps · 8 Mbps" },
+                { value: "1080p60", label: "1080p · 60 fps · 12 Mbps (recommended)" }
+              ]
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onChanged: function(value) { root.setActivitySetting("quality", value) }
+            }
           }
 
           Column {
@@ -1169,28 +1184,6 @@ BarWidget {
             visible: root.selectedTab === "record"
             width: parent.width
             spacing: Style.spacing.panelGap
-
-            BorderSurface {
-              width: parent.width
-              implicitHeight: recordQualityText.implicitHeight + Style.spacing.rowPaddingX * 2
-              radius: Style.cornerRadius
-              color: Util.alpha(Color.popups.text, 0.035)
-              borderSpec: Border.flat(Util.alpha(Color.popups.text, 0.12), 1)
-
-              Text {
-                id: recordQualityText
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Style.spacing.rowPaddingX
-                anchors.rightMargin: Style.spacing.rowPaddingX
-                text: "Native capture quality · 60 fps · MP4"
-                color: Qt.darker(Color.popups.text, 1.3)
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                elide: Text.ElideRight
-              }
-            }
 
             Text {
               visible: root.activityOutputPath !== ""
@@ -1284,7 +1277,7 @@ BarWidget {
               value: root.liveDestination
               options: [
                 { value: "x", label: "X" },
-                { value: "custom", label: "Custom RTMPS" }
+                { value: "custom", label: "Custom RTMP(S)" }
               ]
               foreground: Color.popups.text
               background: Color.popups.background
@@ -1331,21 +1324,6 @@ BarWidget {
                   elide: Text.ElideRight
                 }
               }
-            }
-
-            Dropdown {
-              width: parent.width
-              label: "Stream quality"
-              value: root.qualityMode
-              options: [
-                { value: "720p30", label: "720p · 30 fps · 6 Mbps" },
-                { value: "1080p30", label: "1080p · 30 fps · 8 Mbps" },
-                { value: "1080p60", label: "1080p · 60 fps · 12 Mbps (recommended)" }
-              ]
-              foreground: Color.popups.text
-              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
-              onChanged: function(value) { root.setActivitySetting("quality", value) }
             }
 
             Toggle {
@@ -1438,7 +1416,7 @@ BarWidget {
                 focusable: true
                 foreground: Color.popups.text
                 fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-                enabled: root.selectedProfileConfigured && !root.actionBusy && !root.activityActive
+                enabled: !root.actionBusy && !root.activityActive
                 onClicked: root.clearLiveProfile()
               }
             }
