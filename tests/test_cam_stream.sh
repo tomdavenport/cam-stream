@@ -275,6 +275,8 @@ assert_status 2 "invalid log count returns usage status" "$CAM_STREAM" logs zero
 widget_source="$(<"$ROOT/BarWidget.qml")"
 assert_contains "$widget_source" 'running: root.statusLoaded && !root.streamRunning' "widget suspends automatic camera probing while streaming"
 assert_contains "$widget_source" 'root.refreshStatusEverywhere()' "completed actions refresh status without reprobeing cameras"
+assert_contains "$widget_source" 'var rerun = root.cameraRefreshPending && !root.streamRunning' "queued camera probes are discarded once streaming starts"
+assert_contains "$widget_source" 'failedAction[0] === "start" || failedAction[0] === "restart"' "widget marks successful live actions before restarting discovery timers"
 assert_contains "$widget_source" 'Smoother (adds latency)' "widget labels the smoother mode's latency tradeoff"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
