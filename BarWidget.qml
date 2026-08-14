@@ -278,6 +278,10 @@ BarWidget {
       root.refreshStatusEverywhere()
       return
     }
+    if (failedAction[0] === "start" || failedAction[0] === "restart")
+      root.streamRunning = true
+    else if (failedAction[0] === "stop")
+      root.streamRunning = false
     root.runNextAction()
   }
 
@@ -390,10 +394,9 @@ BarWidget {
         root.camerasLoaded = true
         if (code !== 0) root.setError("cameras", camerasProc.capturedStderr || camerasProc.capturedStdout || "Could not list cameras")
         else if (camerasProc.parseError) root.setError("cameras", camerasProc.parseError)
-        if (root.cameraRefreshPending) {
-          root.cameraRefreshPending = false
-          Qt.callLater(root.refreshCameras)
-        }
+        var rerun = root.cameraRefreshPending && !root.streamRunning
+        root.cameraRefreshPending = false
+        if (rerun) Qt.callLater(root.refreshCameras)
       })
     }
   }
