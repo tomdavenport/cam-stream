@@ -759,19 +759,16 @@ write_activity_state() {
   mv -f "$tmp" "$ACTIVITY_STATE_FILE"
 }
 
-LAST_ACTIVITY_MODE=""
 LAST_ACTIVITY_OUTPUT=""
 LAST_ACTIVITY_ERROR=""
 
 load_activity_last() {
   local key value
-  LAST_ACTIVITY_MODE=""
   LAST_ACTIVITY_OUTPUT=""
   LAST_ACTIVITY_ERROR=""
   [[ -r $ACTIVITY_LAST_FILE ]] || return 0
   while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
     case "$key" in
-      mode) LAST_ACTIVITY_MODE="$value" ;;
       output) LAST_ACTIVITY_OUTPUT="$value" ;;
       error) LAST_ACTIVITY_ERROR="$value" ;;
     esac
@@ -1048,6 +1045,7 @@ built_in_window_selection() {
   [[ -n $monitors && -n $clients ]] || return 1
   workspace="$("$JQ_BIN" -r 'first(.[] | select(.focused == true).activeWorkspace.id) // empty' <<< "$monitors" 2>/dev/null || true)"
   [[ $workspace =~ ^-?[0-9]+$ ]] || return 1
+  # shellcheck disable=SC2016 # jq interpolation belongs to jq, not Bash.
   rectangles="$("$JQ_BIN" -r --argjson workspace "$workspace" '
     .[] | select(.workspace.id == $workspace) |
     "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"
@@ -1313,7 +1311,7 @@ validate_live_server() {
 }
 
 live_configure_command() {
-  local profile="${1:-}" server="" key_stdin="false" key="" extra=""
+  local profile="${1:-}" server="" key_stdin="false" key=""
   (( $# > 0 )) && shift
   [[ $profile == "x" || $profile == "custom" ]] || die_usage "live configure profile must be x or custom"
   while (( $# > 0 )); do
@@ -1341,8 +1339,9 @@ live_configure_command() {
   [[ -n $key ]] || { printf '%s: stream key was empty\n' "$PROGRAM" >&2; return 1; }
   [[ $key != *[[:space:]]* ]] || { key=""; printf '%s: stream key must not contain whitespace\n' "$PROGRAM" >&2; return 1; }
   (( ${#key} <= 4096 )) || { key=""; printf '%s: stream key is unexpectedly long\n' "$PROGRAM" >&2; return 1; }
-  if IFS= read -r extra; then
-    key=""; extra=""
+  if IFS= read -r; then
+    key=""
+    unset REPLY
     printf '%s: stream key input must contain exactly one line\n' "$PROGRAM" >&2
     return 1
   fi
@@ -1434,7 +1433,8 @@ live_start_command() {
   key=""; stream_url=""; args=()
   if [[ $local_copy == "true" ]]; then
     if ! "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" start-replay-recording >/dev/null 2>&1; then
-      local pid="$(activity_running_pid 2>/dev/null || true)"
+      local pid=""
+      pid="$(activity_running_pid 2>/dev/null || true)"
       if [[ -n $pid ]]; then
         if "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" stop >/dev/null 2>&1; then
           wait_for_activity_exit "$pid" || stop_owned_pid_fallback "$pid" || true
