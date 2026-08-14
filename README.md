@@ -58,11 +58,13 @@ other Wayland desktops, but it does not add the native Omarchy bar control.
 
 ## Omarchy plugin gallery
 
-Cam Stream has already been submitted to the project-recommended community
-gallery. Its [submission issue](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/129)
-has passed automated Quattro validation and is awaiting maintainer listing
-review. The automated baseline flags the documented AUR install command for
-routine package-management review; it reports no unsafe finding.
+Cam Stream is live in the project-recommended community gallery. Open the
+[Cam Stream marketplace listing](https://omarchyplugins.com/plugin.html?id=io.github.tomdavenport.cam-stream)
+to review it or copy the install command. Its
+[submission issue](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/129)
+passed automated Quattro validation and maintainer review; the marketplace
+tracks the current validated `main` branch for later versions and preview
+updates.
 
 Plugin authors can submit another public Quattro plugin by following the
 marketplace's [submission guide](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/blob/main/SUBMISSION.md).
