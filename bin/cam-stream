@@ -65,6 +65,7 @@ FOCUSED_MONITOR_BIN="${CAM_STREAM_FOCUSED_MONITOR_BIN:-omarchy-hyprland-monitor-
 HYPRCTL_BIN="${CAM_STREAM_HYPRCTL_BIN:-hyprctl}"
 JQ_BIN="${CAM_STREAM_JQ_BIN:-jq}"
 SLURP_BIN="${CAM_STREAM_SLURP_BIN:-slurp}"
+XDG_USER_DIR_BIN="${CAM_STREAM_XDG_USER_DIR_BIN:-xdg-user-dir}"
 
 DEFAULT_MIRROR="false"
 DEFAULT_LATENCY="untimed"
@@ -993,24 +994,15 @@ activity_status_command() {
 }
 
 activity_output_dir() {
-  local configured="${CAM_STREAM_OUTPUT_DIR:-}"
+  local configured="${CAM_STREAM_OUTPUT_DIR:-}" discovered=""
   if [[ -n $configured ]]; then
     printf '%s\n' "$configured"
     return
   fi
-  if [[ -n ${XDG_VIDEOS_DIR:-} ]]; then
-    printf '%s\n' "$XDG_VIDEOS_DIR"
-    return
-  fi
-  if [[ -r $CONFIG_HOME/user-dirs.dirs ]]; then
-    configured="$(
-      set +u
-      # user-dirs.dirs is the freedesktop source of truth for this user.
-      source "$CONFIG_HOME/user-dirs.dirs"
-      printf '%s' "${XDG_VIDEOS_DIR:-}"
-    )"
-    if [[ -n $configured ]]; then
-      printf '%s\n' "$configured"
+  if tool_available "$XDG_USER_DIR_BIN"; then
+    discovered="$("$XDG_USER_DIR_BIN" VIDEOS 2>/dev/null || true)"
+    if [[ $discovered == /* && $discovered != *$'\n'* && $discovered != *$'\r'* ]]; then
+      printf '%s\n' "$discovered"
       return
     fi
   fi
@@ -1306,14 +1298,18 @@ record_start_command() {
 }
 
 validate_live_server() {
-  local profile="$1" server="$2"
+  local profile="$1" server="$2" remainder="" authority=""
   config_value_safe "$server" || return 1
   [[ $server != *[[:space:]]* ]] || return 1
   case "$profile" in
     x) [[ $server == rtmps://* ]] ;;
     custom) [[ $server == rtmp://* || $server == rtmps://* ]] ;;
     *) return 1 ;;
-  esac
+  esac || return 1
+  [[ $server != *\?* && $server != *#* ]] || return 1
+  remainder="${server#*://}"
+  authority="${remainder%%/*}"
+  [[ -n $authority && $authority != *@* && $authority != :* ]] || return 1
 }
 
 live_configure_command() {
@@ -1343,6 +1339,7 @@ live_configure_command() {
   tool_available "$SECRET_TOOL_BIN" || { printf '%s: Secret Service client not found; refusing to store a stream key in plaintext\n' "$PROGRAM" >&2; return 1; }
   IFS= read -r key || true
   [[ -n $key ]] || { printf '%s: stream key was empty\n' "$PROGRAM" >&2; return 1; }
+  [[ $key != *[[:space:]]* ]] || { key=""; printf '%s: stream key must not contain whitespace\n' "$PROGRAM" >&2; return 1; }
   (( ${#key} <= 4096 )) || { key=""; printf '%s: stream key is unexpectedly long\n' "$PROGRAM" >&2; return 1; }
   if IFS= read -r extra; then
     key=""; extra=""
@@ -1367,15 +1364,19 @@ live_configure_command() {
 }
 
 live_clear_command() {
-  local profile="${1:-}"
+  local profile="${1:-}" key_warning=""
   (( $# == 1 )) || die_usage "live clear expects x or custom"
   [[ $profile == "x" || $profile == "custom" ]] || die_usage "live clear profile must be x or custom"
-  tool_available "$SECRET_TOOL_BIN" || { printf '%s: Secret Service client not found\n' "$PROGRAM" >&2; return 1; }
-  "$SECRET_TOOL_BIN" clear application "$PROGRAM" profile "$profile" >/dev/null 2>&1 || true
   load_config
   if [[ $profile == "x" ]]; then CONFIG_LIVE_SERVER_X=""; else CONFIG_LIVE_SERVER_CUSTOM=""; fi
   write_config
-  printf 'Cleared %s live destination.\n' "$profile"
+  if ! tool_available "$SECRET_TOOL_BIN"; then
+    key_warning="Secret Service client not found; a previously stored stream key may remain in the keyring."
+  elif ! "$SECRET_TOOL_BIN" clear application "$PROGRAM" profile "$profile" >/dev/null 2>&1; then
+    key_warning="Secret Service could not clear the stream key; it may remain in the keyring."
+  fi
+  [[ -z $key_warning ]] || printf '%s: warning: %s\n' "$PROGRAM" "$key_warning" >&2
+  printf 'Cleared %s live destination settings.\n' "$profile"
 }
 
 live_start_command() {
@@ -1478,7 +1479,7 @@ record_pause_state_command() {
 }
 
 record_stop_command() {
-  local pid output
+  local pid output error=""
   (( $# == 0 )) || die_usage "record stop does not accept arguments"
   refresh_activity_runtime
   pid="$(activity_running_pid 2>/dev/null || true)"
@@ -1495,6 +1496,17 @@ record_stop_command() {
     return 1
   fi
   clear_activity_runtime
+  if [[ ! -f $output ]]; then
+    error="Recording stopped, but the expected MP4 was not created."
+  elif [[ ! -s $output ]]; then
+    error="Recording stopped, but the expected MP4 is empty."
+  fi
+  if [[ -n $error ]]; then
+    write_activity_last record "$([[ -f $output ]] && printf '%s' "$output" || true)" "$error"
+    activity_log "stop mode=record output_saved=false"
+    printf '%s: %s Expected path: %s\n' "$PROGRAM" "$error" "$output" >&2
+    return 1
+  fi
   write_activity_last record "$output" ""
   activity_log "stop mode=record output_saved=true"
   printf 'Saved recording: %s\n' "$output"
