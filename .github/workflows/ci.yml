@@ -45,6 +45,9 @@ jobs:
       - name: Test camera helper behavior
         run: ./tests/test_cam_stream.sh
 
+      - name: Test recording and live-stream behavior
+        run: ./tests/test_studio.sh
+
       - name: Parse QML with Qt 6
         shell: bash
         run: |

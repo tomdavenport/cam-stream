@@ -2,6 +2,22 @@
 
 All notable changes to Cam Stream are documented here.
 
+## 1.1.0 — 2026-08-14
+
+- Add native full-screen, window, and region recording without an OBS scene.
+- Add X Live Studio and custom RTMP(S) destinations with secure stream-key
+  storage in the desktop keyring.
+- Record a local copy by default while sending a live stream, using the same
+  encoder and remuxing the result to MP4 after the session.
+- Keep camera preview state independent from recording and streaming so the
+  camera window can be toggled, moved, and resized naturally during capture.
+- Add one unified Camera, Record, and Live Stream control panel with persistent
+  capture, audio, quality, destination, and local-copy preferences.
+- Own screen-recorder processes through private runtime state and IPC; Cam
+  Stream never globally stops another recorder.
+- Extend automated coverage for recording, live configuration, secret
+  handling, recorder conflicts, and failure recovery.
+
 ## 1.0.2 — 2026-08-14
 
 - Stop automatically probing V4L2 devices while a preview is live, avoiding

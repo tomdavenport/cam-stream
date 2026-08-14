@@ -1,9 +1,9 @@
 # Cam Stream
 
 <p align="center">
-  <strong>A native, one-click camera preview for Omarchy 4 / Quattro.</strong><br>
-  Open a realtime floating preview, switch inputs, mirror the image, and get
-  back to work.
+  <strong>Camera, recording, and live streaming—native to Omarchy 4 / Quattro.</strong><br>
+  Stream the full desktop and treat your camera like any other Omarchy window.
+  Move it, resize it, tile it, or hide it in real time. No OBS scene required.
 </p>
 
 <p align="center">
@@ -22,14 +22,17 @@
   <a href="LICENSE"><strong>MIT licensed</strong></a>
 </p>
 
-Cam Stream puts a camera-preview control in the Omarchy bar. Left click the
-camera icon to start or stop the preview. Right click it to choose a camera,
-mirror the picture, or deliberately trade realtime response for smoother
-playback.
+Cam Stream puts a camera, recorder, and live-stream control in the Omarchy bar.
+Left click the icon to start or stop the low-latency camera window. Right click
+to record the screen or send it directly to X Live Studio or another RTMP(S)
+destination. The camera keeps its own state throughout: starting or stopping a
+recording never changes it.
 
-The widget follows the active Omarchy theme and shows distinct live, stopped,
-error, and no-camera states. Its camera helper is bundled in this repository;
-the widget does not look for a separately installed `cam-stream` command.
+Full-screen capture is the default. Window and freeform region pickers use the
+familiar Omarchy capture flow, and the last capture mode is remembered. A local
+copy is recorded by default while sending live. The widget follows the active
+theme and shows distinct camera, recording, sending, stopped, error, and
+no-camera states.
 
 ## Install
 
@@ -42,8 +45,8 @@ omarchy plugin add https://github.com/tomdavenport/cam-stream.git --enable
 ```
 
 No AUR package is needed for the widget: the plugin includes its own helper.
-Left click the new camera icon to toggle the preview, or right click it for the
-camera, mirror, and latency controls.
+Left click the new icon to toggle the camera, or right click it for Camera,
+Record, and Live Stream controls.
 
 ### Arch Linux / AUR command
 
@@ -53,8 +56,9 @@ Install the standalone command without the Quattro widget:
 yay -S cam-stream
 ```
 
-This installs `cam-stream` at `/usr/bin/cam-stream`. It is useful on Arch and
-other Wayland desktops, but it does not add the native Omarchy bar control.
+This installs `cam-stream` at `/usr/bin/cam-stream`. It provides the camera,
+recording, and RTMP(S) commands on Arch and other compatible Wayland desktops,
+but it does not add the native Omarchy bar control.
 
 ## Omarchy plugin gallery
 
@@ -87,6 +91,16 @@ Runtime dependencies:
 - `util-linux` (`flock`)
 - the coreutils and procps tools included in the Omarchy base system
 
+Recording and live streaming additionally use:
+
+- `gpu-screen-recorder` with per-instance IPC support
+- `ffmpeg` to finish live local copies as MP4 files
+- `libsecret` (`secret-tool`) and an unlocked Secret Service keyring for stream
+  keys
+
+These components ship with Omarchy 4. On standalone Arch installations they
+are optional until Record or Live Stream is used.
+
 `hyprctl` and `jq` are optional for best-effort Quattro window positioning;
 the preview still works without automatic positioning. `fuser` from `psmisc`
 is optional for reporting which process has a busy camera.
@@ -117,7 +131,7 @@ cam-stream stop
 ```
 
 The AUR package is intentionally command-only. To add the native Quattro bar
-control, use the Omarchy installation below; that plugin remains self-contained
+control, use the Omarchy installation below; the plugin remains self-contained
 and does not depend on the AUR package.
 
 ## Review-first Omarchy installation
@@ -145,10 +159,13 @@ settings can move it later.
 
 ## Use
 
-- **Left click** the bar icon to start or stop the camera preview.
-- **Right click** to open the control panel.
+- **Left click** the bar icon to start or stop the camera preview, including
+  while recording or sending live.
+- **Right click** to open the Camera, Record, and Live Stream panel.
 - **Middle click** to refresh camera and runtime state.
 - Press **R** while the panel has focus to refresh it.
+
+### Camera
 
 The selected camera, mirror preference, and latency preference persist in Cam
 Stream's own XDG configuration directory. Changing the camera or playback mode
@@ -159,6 +176,42 @@ path. **Smoother (adds latency)** is an explicit opt-in for steadier frame
 pacing. Automatic camera discovery pauses while the preview is live so the bar
 never repeatedly probes the active capture device; status checks continue.
 
+### Record
+
+Choose **Full screen**, **Window**, or **Region**, select an audio source, and
+press **Start recording**. Full screen records the focused monitor. Window and
+Region open the Omarchy picker for that run. The capture mode is remembered;
+specific windows and rectangles are deliberately not.
+
+Recordings are written beneath the user's Videos directory. Recording does not
+start or stop the camera, so the floating camera window appears only when the
+user has chosen to show it. Pause, resume, and stop affect only Cam Stream's
+owned recording process. The shared quality preset caps output resolution and
+frame rate; recordings use GPU Screen Recorder's very-high quality mode.
+
+### Live Stream
+
+Cam Stream supports an **X** profile and a **Custom** RTMP(S) profile. X always
+uses encrypted RTMPS; custom destinations may use RTMP, though RTMPS is strongly
+recommended. For X:
+
+1. Open [X Live Studio](https://x.com/i/live-studio) and create or select a
+   source.
+2. Paste its `rtmps://` server URL and stream key into Cam Stream, then save.
+3. Choose capture, audio, and quality settings and press **Start sending**.
+4. Preview and publish the broadcast in X Live Studio.
+
+Cam Stream says **Sending to X** rather than claiming the broadcast is already
+public. Publishing and ending the X broadcast remain explicit actions in X.
+Local recording is enabled by default and uses the same encode; after stopping,
+Cam Stream remuxes that local copy to MP4 without re-encoding it.
+
+Live presets use constant bitrates of 6 Mbps for 720p30, 8 Mbps for 1080p30,
+and 12 Mbps for 1080p60.
+
+Stream keys are stored in the desktop keyring, never in Cam Stream's config or
+logs. Cam Stream fails closed when no usable Secret Service is available.
+
 The bundled command also works directly:
 
 ```bash
@@ -167,6 +220,13 @@ cam_stream="$HOME/.config/omarchy/plugins/io.github.tomdavenport.cam-stream/bin/
 "$cam_stream" camera list
 "$cam_stream" start
 "$cam_stream" stop
+"$cam_stream" activity settings
+"$cam_stream" record start
+"$cam_stream" record stop
+printf '%s' "$stream_key" | "$cam_stream" live configure x \
+  --server 'rtmps://example.invalid/app' --key-stdin
+"$cam_stream" live start x
+"$cam_stream" live stop
 ```
 
 Run `"$cam_stream" --help` for the complete command reference.
@@ -189,11 +249,13 @@ Disable the widget without deleting its checkout:
 omarchy plugin disable io.github.tomdavenport.cam-stream
 ```
 
-Stop a live preview before removing the plugin, because the preview process is
-separate from the shell:
+Stop any recording or live send, then stop the camera preview before removing
+the plugin, because those processes are separate from the shell:
 
 ```bash
 cam_stream="$HOME/.config/omarchy/plugins/io.github.tomdavenport.cam-stream/bin/cam-stream"
+"$cam_stream" live stop
+"$cam_stream" record stop
 "$cam_stream" stop
 omarchy plugin remove io.github.tomdavenport.cam-stream
 ```
@@ -206,11 +268,12 @@ Stream's user preferences and diagnostic history in place.
 After stopping the preview and removing the plugin, its residual data is
 limited to its own XDG locations:
 
-- `${XDG_CONFIG_HOME:-$HOME/.config}/cam-stream/config` — selected camera and
-  playback preferences, stored as plain data and never sourced as shell code
+- `${XDG_CONFIG_HOME:-$HOME/.config}/cam-stream/config` — camera, capture,
+  audio, quality, destination, and non-secret endpoint preferences, stored as
+  plain data and never sourced as shell code
 - `${XDG_STATE_HOME:-$HOME/.local/state}/cam-stream/` — the runtime log, PID,
-  and active-launch record
-- `${XDG_RUNTIME_DIR}/cam-stream/` — transient lock and local `mpv` IPC files
+  active-launch records, and last activity result
+- `${XDG_RUNTIME_DIR}/cam-stream/` — transient locks and local mpv/GSR IPC files
   when `XDG_RUNTIME_DIR` is secure; otherwise Cam Stream uses an owner-only
   directory below `${TMPDIR:-/tmp}/cam-stream-runtime-$(id -u)/`
 
@@ -224,13 +287,23 @@ Omarchy loads plugins as unsandboxed code inside its long-lived shell. Review
 this repository and every update before enabling it. A marketplace listing is
 discovery metadata, not a security review or endorsement.
 
-Cam Stream's runtime behavior is local:
+Cam Stream's preview and recording behavior is local. Live Stream deliberately
+connects to the RTMP(S) destination the user configured:
 
 - The QML widget launches only the `bin/cam-stream` file bundled in the plugin
   checkout.
-- The helper reads local V4L2 camera devices and starts a local `mpv` preview.
-- It requires no elevated privileges, system service, or network connection.
-- It writes only to its own XDG config, state, and runtime paths.
+- The helper reads local V4L2 camera devices, starts a local `mpv` preview, and
+  can run one explicitly requested screen recording or RTMP(S) send.
+- It requires no elevated privileges or system service.
+- It writes runtime metadata only to its own XDG config, state, and runtime
+  paths; recordings go to the user's Videos directory.
+- Stream keys are passed to the helper over stdin and stored through Secret
+  Service. They are excluded from config, logs, status, and normal output.
+
+`gpu-screen-recorder` receives the destination while a stream is active, so the
+current user's process-inspection tools may be able to see it at runtime. The
+keyring protects credentials at rest; it cannot hide data from other processes
+already running as the same user.
 
 Installing and updating through `omarchy plugin` does use git and the network
 to retrieve this public repository.

@@ -213,11 +213,14 @@ BarWidget {
       var copy = root.activityLocalCopyActive ? " · local copy on" : ""
       return root.formatElapsed(root.activityElapsedSeconds) + copy
     }
-    if (root.selectedTab === "record")
-      return "Uses Omarchy's capture picker with the " + root.qualityMode + " quality preset."
+    if (root.selectedTab === "record") {
+      var captureLabel = root.captureMode === "fullscreen" ? "Focused monitor"
+        : root.captureMode === "window" ? "Window picker" : "Region picker"
+      return captureLabel + " · " + root.qualityMode
+    }
     if (root.selectedProfileConfigured)
       return root.destinationLabel(root.liveDestination) + " is configured · " + root.qualityMode
-    return "Paste the RTMPS server and stream key supplied by your platform."
+    return "Paste the stream server and key supplied by your platform."
   }
 
   function panelStateActive() {
@@ -560,7 +563,9 @@ BarWidget {
     var server = String(serverField.text || "").trim()
     var key = String(streamKeyField.text || "")
     if (!server) {
-      root.setActivityError("configure", "Enter the RTMPS server URL")
+      root.setActivityError("configure", root.liveDestination === "x"
+        ? "Enter the RTMPS server URL"
+        : "Enter the RTMP(S) server URL")
       return
     }
     if (!key) {
@@ -1168,9 +1173,9 @@ BarWidget {
               label: "Video quality"
               value: root.qualityMode
               options: [
-                { value: "720p30", label: "720p · 30 fps · 6 Mbps" },
-                { value: "1080p30", label: "1080p · 30 fps · 8 Mbps" },
-                { value: "1080p60", label: "1080p · 60 fps · 12 Mbps (recommended)" }
+                { value: "720p30", label: "720p · 30 fps" },
+                { value: "1080p30", label: "1080p · 30 fps" },
+                { value: "1080p60", label: "1080p · 60 fps (recommended)" }
               ]
               foreground: Color.popups.text
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
@@ -1342,7 +1347,7 @@ BarWidget {
             }
 
             PanelSectionHeader {
-              text: "RTMPS PROFILE"
+              text: "RTMP(S) PROFILE"
               foreground: Color.popups.text
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
             }
@@ -1361,7 +1366,7 @@ BarWidget {
               width: parent.width
               placeholderText: root.selectedProfileConfigured
                 ? "Configured — paste a new URL to replace"
-                : "rtmps://…"
+                : root.liveDestination === "x" ? "rtmps://…" : "rtmps://… or rtmp://…"
               foreground: Color.popups.text
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               enabled: !root.actionBusy && !root.activityActive
