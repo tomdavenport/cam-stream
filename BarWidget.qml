@@ -31,17 +31,51 @@ BarWidget {
   property int cameraRevision: 0
   property string cameraChoice: ""
 
+  // Recording and live streaming deliberately share one activity state but
+  // remain independent from the camera preview above. A camera may be off
+  // while either activity is running; that is a valid streaming setup.
+  property bool activityLoaded: false
+  property bool activitySettingsLoaded: false
+  property string activityMode: "idle"
+  property bool activityPaused: false
+  property int activityElapsedSeconds: 0
+  property string activityOutputPath: ""
+  property string activityDestination: ""
+  property bool activityLocalCopyActive: false
+  property string activityErrorMessage: ""
+  property string activityErrorSource: ""
+
+  property string captureMode: "fullscreen"
+  property string audioMode: "none"
+  property string qualityMode: "1080p60"
+  property string liveDestination: "x"
+  property bool localCopyEnabled: true
+  property bool xConfigured: false
+  property bool customConfigured: false
+  property string xServer: ""
+  property string customServer: ""
+  property string selectedTab: "camera"
+
   property string errorMessage: ""
   property string errorSource: ""
   property bool statusRefreshPending: false
   property bool cameraRefreshPending: false
+  property bool settingsRefreshPending: false
 
   property var actionQueue: []
   property var currentAction: []
   property string actionStdout: ""
   property string actionStderr: ""
 
-  readonly property bool actionBusy: actionProc.running || currentAction.length > 0 || actionQueue.length > 0
+  readonly property bool actionBusy: actionProc.running || secretProc.running
+    || currentAction.length > 0 || actionQueue.length > 0
+  readonly property bool recordActive: activityMode === "record"
+  readonly property bool liveActive: activityMode === "live"
+  readonly property bool activityActive: recordActive || liveActive
+  readonly property bool selectedProfileConfigured: liveDestination === "custom"
+    ? customConfigured : xConfigured
+  readonly property string selectedProfileServer: liveDestination === "custom"
+    ? customServer : xServer
   readonly property bool noCamera: camerasLoaded && cameraOptions.length === 0
   readonly property bool hasError: errorMessage !== ""
   readonly property bool firstLoad: !statusLoaded
@@ -58,7 +92,9 @@ BarWidget {
     : streamRunning ? root.runningDetail()
     : "Choose an input, then start the preview."
   readonly property string cameraButtonText: firstLoad ? "\uf110"
-    : hasError ? "\uf071"
+    : liveActive ? "\uf519"
+    : recordActive ? "\uf111"
+    : hasError || activityErrorMessage !== "" ? "\uf071"
     : noCamera ? "\uf05e"
     : streamRunning ? "\uf03d"
     : "\uf030"
@@ -100,6 +136,98 @@ BarWidget {
     root.errorMessage = ""
   }
 
+  function setActivityError(source, message) {
+    root.activityErrorSource = source
+    root.activityErrorMessage = root.compactError(message, "Cam Stream activity failed")
+  }
+
+  function clearActivityError(source) {
+    if (root.activityErrorSource !== source) return
+    root.activityErrorSource = ""
+    root.activityErrorMessage = ""
+  }
+
+  function normalizedActivityMode(value) {
+    var mode = String(value || "idle").toLowerCase()
+    if (mode === "record" || mode === "recording" || mode === "paused") return "record"
+    if (mode === "live" || mode === "stream" || mode === "streaming" || mode === "sending") return "live"
+    return "idle"
+  }
+
+  function normalizedCaptureMode(value) {
+    var mode = String(value || "fullscreen").toLowerCase()
+    return mode === "window" || mode === "region" ? mode : "fullscreen"
+  }
+
+  function normalizedAudioMode(value) {
+    var mode = String(value || "none").toLowerCase()
+    return mode === "microphone" || mode === "desktop" || mode === "both" ? mode : "none"
+  }
+
+  function normalizedQuality(value) {
+    var quality = String(value || "1080p60").toLowerCase()
+    return quality === "720p30" || quality === "1080p30" ? quality : "1080p60"
+  }
+
+  function formatElapsed(value) {
+    var total = Math.max(0, Math.floor(Number(value) || 0))
+    var hours = Math.floor(total / 3600)
+    var minutes = Math.floor((total % 3600) / 60)
+    var seconds = total % 60
+    var mm = minutes < 10 ? "0" + minutes : String(minutes)
+    var ss = seconds < 10 ? "0" + seconds : String(seconds)
+    return hours > 0 ? String(hours) + ":" + mm + ":" + ss : mm + ":" + ss
+  }
+
+  function destinationLabel(value) {
+    return String(value || "x").toLowerCase() === "custom" ? "Custom RTMP(S)" : "X"
+  }
+
+  function panelHasError() {
+    return root.selectedTab === "camera" ? root.hasError : root.activityErrorMessage !== ""
+  }
+
+  function panelStateTitle() {
+    if (root.selectedTab === "camera") return root.stateTitle
+    if (root.activityErrorMessage) return "Something went wrong"
+    if (root.selectedTab === "record") {
+      if (root.recordActive) return root.activityPaused ? "Recording paused" : "Recording your screen"
+      if (root.liveActive) return "Live stream is active"
+      return "Ready to record"
+    }
+    if (root.liveActive)
+      return "Sending to " + root.destinationLabel(root.activityDestination || root.liveDestination)
+    if (root.recordActive) return "Screen recording is active"
+    return root.selectedProfileConfigured ? "Ready to send" : "Set up your stream destination"
+  }
+
+  function panelStateDetail() {
+    if (root.selectedTab === "camera") return root.stateDetail
+    if (root.activityErrorMessage) return root.activityErrorMessage
+    if (root.recordActive) {
+      var recordingState = root.activityPaused ? "Paused" : "Recording"
+      return recordingState + " · " + root.formatElapsed(root.activityElapsedSeconds)
+        + (root.activityOutputPath ? " · " + root.activityOutputPath : "")
+    }
+    if (root.liveActive) {
+      var copy = root.activityLocalCopyActive ? " · local copy on" : ""
+      return root.formatElapsed(root.activityElapsedSeconds) + copy
+    }
+    if (root.selectedTab === "record") {
+      var captureLabel = root.captureMode === "fullscreen" ? "Focused monitor"
+        : root.captureMode === "window" ? "Window picker" : "Region picker"
+      return captureLabel + " · " + root.qualityMode
+    }
+    if (root.selectedProfileConfigured)
+      return root.destinationLabel(root.liveDestination) + " is configured · " + root.qualityMode
+    return "Paste the stream server and key supplied by your platform."
+  }
+
+  function panelStateActive() {
+    if (root.selectedTab === "camera") return root.streamRunning
+    return root.activityActive
+  }
+
   function cameraName(value) {
     var target = String(value || "")
     if (!target) return "Automatic camera"
@@ -123,9 +251,16 @@ BarWidget {
 
   function tooltipForState() {
     if (root.firstLoad) return "Cam Stream · Checking camera state"
+    if (root.liveActive)
+      return "Cam Stream · Sending to " + root.destinationLabel(root.activityDestination || root.liveDestination)
+        + " · Left click toggles camera · Right click for controls"
+    if (root.recordActive)
+      return "Cam Stream · " + (root.activityPaused ? "Recording paused" : "Recording " + root.formatElapsed(root.activityElapsedSeconds))
+        + " · Left click toggles camera · Right click for controls"
+    if (root.activityErrorMessage) return "Cam Stream activity error · " + root.activityErrorMessage + " · Right click for details"
     if (root.hasError) return "Cam Stream error · " + root.errorMessage + " · Right click for details"
     if (root.noCamera) return "Cam Stream · No camera found · Right click for settings"
-    if (root.streamRunning) return "Cam Stream · Live on " + root.cameraName(root.activeCamera) + " · Left click to stop"
+    if (root.stateName === "running") return "Cam Stream · Camera on " + root.cameraName(root.activeCamera) + " · Left click to stop"
     return "Cam Stream · Stopped · Left click to start · Right click for settings"
   }
 
@@ -182,9 +317,74 @@ BarWidget {
       ? "" : String(data.captureSize)
     root.captureFps = data.captureFps === null || data.captureFps === undefined
       ? "" : String(data.captureFps)
+
+    var wasActivityLoaded = root.activityLoaded
+    var activity = data.activity && typeof data.activity === "object" ? data.activity : {}
+    var state = String(activity.state || "").toLowerCase()
+    var mode = root.normalizedActivityMode(activity.mode || state)
+    var running = activity.running === true
+      || state === "recording" || state === "paused" || state === "sending"
+    root.activityMode = running ? mode : "idle"
+    root.activityPaused = root.activityMode === "record"
+      && (activity.paused === true || state === "paused")
+    root.activityElapsedSeconds = Math.max(0, Math.floor(Number(activity.elapsedSeconds) || 0))
+    root.activityOutputPath = String(activity.outputPath || activity.lastOutputPath || "")
+    root.activityDestination = String(activity.destination || "")
+    root.activityLocalCopyActive = activity.localCopy === true
+    root.activityLoaded = true
+    if (activity.error) root.setActivityError("activity", activity.error)
+    else root.clearActivityError("activity")
+
+    if (activity.captureMode !== undefined)
+      root.captureMode = root.normalizedCaptureMode(activity.captureMode)
+    if (activity.audioMode !== undefined)
+      root.audioMode = root.normalizedAudioMode(activity.audioMode)
+    if (activity.quality !== undefined)
+      root.qualityMode = root.normalizedQuality(activity.quality)
+    if (activity.destination !== undefined && !root.activityActive)
+      root.liveDestination = String(activity.destination).toLowerCase() === "custom" ? "custom" : "x"
+    if (activity.localCopy !== undefined && !root.activityActive)
+      root.localCopyEnabled = activity.localCopy !== false
+
     root.statusLoaded = true
     root.clearError("status")
+    root.clearActivityError("status")
+    if (!wasActivityLoaded && root.activityActive && root.opened)
+      root.selectedTab = root.liveActive ? "live" : "record"
     Qt.callLater(root.syncCameraChoice)
+    return ""
+  }
+
+  function applyActivitySettings(raw) {
+    var data
+    try {
+      data = JSON.parse(String(raw || "").trim())
+    } catch (e) {
+      return "Activity settings returned invalid JSON"
+    }
+    if (!data || typeof data !== "object")
+      return "Activity settings returned an unsupported response"
+
+    var settings = data.settings && typeof data.settings === "object" ? data.settings : data
+    root.captureMode = root.normalizedCaptureMode(settings.captureMode || settings.capture)
+    root.audioMode = root.normalizedAudioMode(settings.audioMode || settings.audio)
+    root.qualityMode = root.normalizedQuality(settings.quality)
+    root.liveDestination = String(settings.destination || "x").toLowerCase() === "custom" ? "custom" : "x"
+    root.localCopyEnabled = settings.localCopy === undefined
+      ? (settings.localCopyEnabled === undefined ? true : settings.localCopyEnabled !== false)
+      : settings.localCopy !== false
+
+    var profiles = settings.profiles && typeof settings.profiles === "object" ? settings.profiles : {}
+    var xProfile = profiles.x && typeof profiles.x === "object" ? profiles.x
+      : (settings.x && typeof settings.x === "object" ? settings.x : {})
+    var customProfile = profiles.custom && typeof profiles.custom === "object" ? profiles.custom
+      : (settings.custom && typeof settings.custom === "object" ? settings.custom : {})
+    root.xConfigured = xProfile.configured === true || settings.xConfigured === true
+    root.customConfigured = customProfile.configured === true || settings.customConfigured === true
+    root.xServer = String(xProfile.server || xProfile.serverUrl || settings.xServer || "")
+    root.customServer = String(customProfile.server || customProfile.serverUrl || settings.customServer || "")
+    root.activitySettingsLoaded = true
+    root.clearActivityError("settings")
     return ""
   }
 
@@ -230,9 +430,22 @@ BarWidget {
     camerasProc.running = true
   }
 
+  function refreshActivitySettings() {
+    if (settingsProc.running) {
+      root.settingsRefreshPending = true
+      return
+    }
+    settingsProc.capturedStdout = ""
+    settingsProc.capturedStderr = ""
+    settingsProc.parseError = ""
+    settingsProc.command = root.helperCommand(["activity", "settings", "--json"])
+    settingsProc.running = true
+  }
+
   function refresh() {
     root.refreshStatus()
     root.refreshCameras()
+    root.refreshActivitySettings()
   }
 
   function refreshEverywhere() {
@@ -241,6 +454,11 @@ BarWidget {
 
   function refreshStatusEverywhere() {
     root.broadcast("refreshStatus")
+  }
+
+  function isActivityCommand(action) {
+    if (!action || action.length === 0) return false
+    return action[0] === "activity" || action[0] === "record" || action[0] === "live"
   }
 
   function runActions(sequence) {
@@ -255,7 +473,9 @@ BarWidget {
     if (actionProc.running || root.currentAction.length > 0) return
     if (root.actionQueue.length === 0) {
       root.clearError("action")
+      root.clearActivityError("action")
       root.refreshStatusEverywhere()
+      root.refreshActivitySettings()
       return
     }
 
@@ -273,9 +493,12 @@ BarWidget {
     root.currentAction = []
     if (exitCode !== 0) {
       root.actionQueue = []
-      root.setError("action", root.actionStderr || root.actionStdout
-        || ("Command failed: " + failedAction.join(" ")))
+      var message = root.actionStderr || root.actionStdout
+        || ("Command failed: " + failedAction.join(" "))
+      if (root.isActivityCommand(failedAction)) root.setActivityError("action", message)
+      else root.setError("action", message)
       root.refreshStatusEverywhere()
+      if (root.isActivityCommand(failedAction)) root.refreshActivitySettings()
       return
     }
     if (failedAction[0] === "start" || failedAction[0] === "restart")
@@ -316,10 +539,102 @@ BarWidget {
       : [["settings", "set", "latency", normalized]])
   }
 
+  function setActivitySetting(name, value) {
+    if (root.actionBusy || root.activityActive) return
+    var normalized = String(value)
+    if (name === "capture") root.captureMode = root.normalizedCaptureMode(normalized)
+    else if (name === "audio") root.audioMode = root.normalizedAudioMode(normalized)
+    else if (name === "quality") root.qualityMode = root.normalizedQuality(normalized)
+    else if (name === "destination") {
+      root.liveDestination = normalized.toLowerCase() === "custom" ? "custom" : "x"
+      if (streamKeyField) streamKeyField.text = ""
+      Qt.callLater(root.syncProfileEditor)
+    } else if (name === "local-copy") root.localCopyEnabled = normalized === "true"
+    root.runActions([["activity", "set", name, normalized]])
+  }
+
+  function syncProfileEditor() {
+    if (!serverField || serverField.activeFocus || (streamKeyField && streamKeyField.activeFocus)) return
+    serverField.text = root.selectedProfileServer
+  }
+
+  function configureLive() {
+    if (root.actionBusy || root.activityActive) return
+    var server = String(serverField.text || "").trim()
+    var key = String(streamKeyField.text || "")
+    if (!server) {
+      root.setActivityError("configure", root.liveDestination === "x"
+        ? "Enter the RTMPS server URL"
+        : "Enter the RTMP(S) server URL")
+      return
+    }
+    if (!key) {
+      root.setActivityError("configure", "Enter the stream key")
+      return
+    }
+    root.clearActivityError("configure")
+    secretProc.capturedStdout = ""
+    secretProc.capturedStderr = ""
+    secretProc.secret = key
+    secretProc.command = root.helperCommand([
+      "live", "configure", root.liveDestination,
+      "--server", server,
+      "--key-stdin"
+    ])
+    // The masked field is cleared before the child starts. The transient
+    // Process property is cleared immediately after writing to stdin.
+    streamKeyField.text = ""
+    secretProc.running = true
+  }
+
+  function clearLiveProfile() {
+    if (root.actionBusy || root.activityActive) return
+    serverField.text = ""
+    streamKeyField.text = ""
+    if (root.liveDestination === "custom") root.customConfigured = false
+    else root.xConfigured = false
+    root.runActions([["live", "clear", root.liveDestination]])
+  }
+
+  function startRecording() {
+    if (root.actionBusy || root.activityActive) return
+    root.close()
+    root.runActions([["record", "start"]])
+  }
+
+  function toggleRecordingPause() {
+    if (root.actionBusy || !root.recordActive) return
+    root.runActions([["record", root.activityPaused ? "resume" : "pause"]])
+  }
+
+  function stopRecording() {
+    if (root.actionBusy || !root.recordActive) return
+    root.runActions([["record", "stop"]])
+  }
+
+  function toggleLive() {
+    if (root.actionBusy) return
+    if (root.liveActive) {
+      root.runActions([["live", "stop"]])
+      return
+    }
+    if (root.activityActive || !root.selectedProfileConfigured) return
+    root.close()
+    root.runActions([["live", "start", root.liveDestination]])
+  }
+
+  function openXLiveStudio() {
+    if (urlProc.running) return
+    urlProc.command = ["xdg-open", "https://x.com/i/live-studio"]
+    urlProc.running = true
+  }
+
   function open(payloadJson) {
     root.opened = true
     root.refreshStatus()
+    root.refreshActivitySettings()
     if (!root.streamRunning) root.refreshCameras()
+    if (root.activityActive) root.selectedTab = root.liveActive ? "live" : "record"
   }
 
   function close() {
@@ -359,8 +674,15 @@ BarWidget {
       var code = exitCode
       Qt.callLater(function() {
         root.statusLoaded = true
-        if (code !== 0) root.setError("status", statusProc.capturedStderr || statusProc.capturedStdout || "Could not read Cam Stream status")
-        else if (statusProc.parseError) root.setError("status", statusProc.parseError)
+        root.activityLoaded = true
+        if (code !== 0) {
+          var message = statusProc.capturedStderr || statusProc.capturedStdout || "Could not read Cam Stream status"
+          root.setError("status", message)
+          root.setActivityError("status", message)
+        } else if (statusProc.parseError) {
+          root.setError("status", statusProc.parseError)
+          root.setActivityError("status", statusProc.parseError)
+        }
         if (root.statusRefreshPending) {
           root.statusRefreshPending = false
           Qt.callLater(root.refreshStatus)
@@ -402,6 +724,39 @@ BarWidget {
   }
 
   Process {
+    id: settingsProc
+    command: []
+
+    property string capturedStdout: ""
+    property string capturedStderr: ""
+    property string parseError: ""
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        settingsProc.capturedStdout = String(text || "")
+        settingsProc.parseError = root.applyActivitySettings(settingsProc.capturedStdout)
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: settingsProc.capturedStderr = String(text || "")
+    }
+    onExited: function(exitCode) {
+      var code = exitCode
+      Qt.callLater(function() {
+        if (code !== 0) root.setActivityError("settings", settingsProc.capturedStderr
+          || settingsProc.capturedStdout || "Could not read recording and live settings")
+        else if (settingsProc.parseError) root.setActivityError("settings", settingsProc.parseError)
+        if (root.settingsRefreshPending) {
+          root.settingsRefreshPending = false
+          Qt.callLater(root.refreshActivitySettings)
+        }
+      })
+    }
+  }
+
+  Process {
     id: actionProc
     command: []
 
@@ -419,8 +774,52 @@ BarWidget {
     }
   }
 
+  Process {
+    id: secretProc
+    command: []
+    property string secret: ""
+    property string capturedStdout: ""
+    property string capturedStderr: ""
+    stdinEnabled: true
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: secretProc.capturedStdout = String(text || "")
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: secretProc.capturedStderr = String(text || "")
+    }
+    onStarted: {
+      write(secret + "\n")
+      secret = ""
+    }
+    onExited: function(exitCode) {
+      var code = exitCode
+      Qt.callLater(function() {
+        secretProc.secret = ""
+        if (code !== 0) root.setActivityError("configure", secretProc.capturedStderr
+          || secretProc.capturedStdout || "Could not save the stream profile")
+        else {
+          root.clearActivityError("configure")
+          root.refreshActivitySettings()
+          root.refreshStatusEverywhere()
+        }
+      })
+    }
+  }
+
+  Process {
+    id: urlProc
+    command: []
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.setActivityError("url", "Could not open X Live Studio")
+      else root.clearActivityError("url")
+    }
+  }
+
   Timer {
-    interval: root.opened ? 1800 : 4000
+    interval: root.activityActive ? 1000 : (root.opened ? 1800 : 4000)
     running: true
     repeat: true
     triggeredOnStart: true
@@ -433,6 +832,14 @@ BarWidget {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refreshCameras()
+  }
+
+  Timer {
+    interval: root.opened ? 12000 : 30000
+    running: !root.activityActive
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refreshActivitySettings()
   }
 
   IpcHandler {
@@ -455,11 +862,11 @@ BarWidget {
     text: root.cameraButtonText
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.body
-    active: root.streamRunning || root.hasError
-    activeColor: root.hasError
+    active: root.activityActive || root.streamRunning || root.hasError || root.activityErrorMessage !== ""
+    activeColor: root.hasError || root.activityErrorMessage !== "" || root.activityActive
       ? (root.bar ? root.bar.urgent : Color.urgent)
       : Color.accent
-    dimmed: root.noCamera && !root.hasError
+    dimmed: root.noCamera && !root.hasError && !root.activityActive
     tooltipText: root.tooltipText
 
     onPressed: function(buttonCode) {
@@ -476,8 +883,8 @@ BarWidget {
     bar: root.bar
     open: root.opened
     focusTarget: panelFocus
-    contentWidth: panel.fittedContentWidth(Style.space(370))
-    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(620))
+    contentWidth: panel.fittedContentWidth(Style.space(390))
+    contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(700))
 
     Item {
       id: panelFocus
@@ -492,195 +899,586 @@ BarWidget {
         }
       }
 
-      Column {
-        id: panelColumn
-        width: parent.width
-        spacing: Style.spacing.panelGap
+      Flickable {
+        id: panelScroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: panelColumn.implicitHeight
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
 
-        Item {
-          width: parent.width
-          implicitHeight: Math.max(titleColumn.implicitHeight, refreshButton.implicitHeight)
+        Column {
+          id: panelColumn
+          width: panelScroll.width
+          spacing: Style.spacing.panelGap
 
-          Column {
-            id: titleColumn
-            anchors.left: parent.left
-            anchors.right: refreshButton.left
-            anchors.rightMargin: Style.spacing.controlGap
-            spacing: Style.spacing.xs
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(titleColumn.implicitHeight, refreshButton.implicitHeight)
 
-            Text {
-              width: parent.width
-              text: "CAM STREAM"
-              color: Color.popups.text
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.title
-              font.bold: true
-              elide: Text.ElideRight
+            Column {
+              id: titleColumn
+              anchors.left: parent.left
+              anchors.right: refreshButton.left
+              anchors.rightMargin: Style.spacing.controlGap
+              spacing: Style.spacing.xs
+
+              Text {
+                width: parent.width
+                text: "CAM STREAM"
+                color: Color.popups.text
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                text: "Camera, recording and live streaming"
+                color: Qt.darker(Color.popups.text, 1.45)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+              }
             }
 
-            Text {
-              width: parent.width
-              text: "Low-latency camera preview"
-              color: Qt.darker(Color.popups.text, 1.45)
-              font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
+            PanelActionButton {
+              id: refreshButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              iconText: "\uf021"
+              tooltipText: "Refresh Cam Stream state (R)"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy
+              onClicked: root.refreshEverywhere()
             }
           }
 
-          PanelActionButton {
-            id: refreshButton
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            iconText: "\uf021"
-            tooltipText: "Refresh camera state (R)"
+          ButtonGroup {
+            id: modeTabs
+            width: parent.width
+            value: root.selectedTab
+            options: [
+              { value: "camera", label: "Camera" },
+              { value: "record", label: "Record" },
+              { value: "live", label: "Live Stream" }
+            ]
             foreground: Color.popups.text
+            background: Color.popups.background
+            accent: Color.accent
             fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
             enabled: !root.actionBusy
-            onClicked: root.refreshEverywhere()
+            onChanged: function(value) {
+              root.selectedTab = value
+              panelScroll.contentY = 0
+              if (value === "live") Qt.callLater(root.syncProfileEditor)
+            }
           }
-        }
 
-        BorderSurface {
-          width: parent.width
-          implicitHeight: statusContent.implicitHeight + Style.spacing.rowPaddingX * 2
-          radius: Style.cornerRadius
-          color: root.hasError
-            ? Util.alpha(root.bar ? root.bar.urgent : Color.urgent, 0.10)
-            : root.streamRunning
-              ? Util.alpha(Color.accent, 0.10)
-              : Util.alpha(Color.popups.text, 0.045)
-          borderSpec: Border.flat(root.hasError
-            ? Util.alpha(root.bar ? root.bar.urgent : Color.urgent, 0.45)
-            : root.streamRunning ? Util.alpha(Color.accent, 0.38) : Util.alpha(Color.popups.text, 0.14), 1)
+          BorderSurface {
+            width: parent.width
+            implicitHeight: statusContent.implicitHeight + Style.spacing.rowPaddingX * 2
+            radius: Style.cornerRadius
+            color: root.panelHasError()
+              ? Util.alpha(root.bar ? root.bar.urgent : Color.urgent, 0.10)
+              : root.panelStateActive()
+                ? Util.alpha(root.selectedTab === "camera" ? Color.accent : (root.bar ? root.bar.urgent : Color.urgent), 0.10)
+                : Util.alpha(Color.popups.text, 0.045)
+            borderSpec: Border.flat(root.panelHasError()
+              ? Util.alpha(root.bar ? root.bar.urgent : Color.urgent, 0.45)
+              : root.panelStateActive()
+                ? Util.alpha(root.selectedTab === "camera" ? Color.accent : (root.bar ? root.bar.urgent : Color.urgent), 0.38)
+                : Util.alpha(Color.popups.text, 0.14), 1)
+
+            Column {
+              id: statusContent
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.spacing.rowPaddingX
+              anchors.rightMargin: Style.spacing.rowPaddingX
+              spacing: Style.spacing.xs
+
+              Text {
+                width: parent.width
+                text: root.panelStateTitle()
+                color: root.panelHasError()
+                  ? (root.bar ? root.bar.urgent : Color.urgent)
+                  : Color.popups.text
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                text: root.panelStateDetail()
+                color: Qt.darker(Color.popups.text, 1.35)
+                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+                elide: Text.ElideRight
+                maximumLineCount: 3
+              }
+            }
+          }
 
           Column {
-            id: statusContent
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.leftMargin: Style.spacing.rowPaddingX
-            anchors.rightMargin: Style.spacing.rowPaddingX
-            spacing: Style.spacing.xs
+            id: cameraTab
+            visible: root.selectedTab === "camera"
+            width: parent.width
+            spacing: Style.spacing.panelGap
+
+            PanelSeparator {
+              foreground: Color.popups.text
+            }
+
+            PanelSectionHeader {
+              text: "CAMERA"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+
+            Dropdown {
+              id: cameraDropdown
+              width: parent.width
+              label: "Input"
+              value: root.cameraChoice
+              options: root.cameraOptions
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy && root.cameraOptions.length > 0
+              onChanged: function(value) {
+                root.cameraChoice = value
+                root.selectCamera(value)
+              }
+            }
 
             Text {
+              visible: root.camerasLoaded && root.cameraOptions.length === 0
               width: parent.width
-              text: root.stateTitle
-              color: root.hasError
-                ? (root.bar ? root.bar.urgent : Color.urgent)
-                : Color.popups.text
+              text: "No video-capable input is available. Cam Stream ignores metadata-only camera nodes."
+              color: Qt.darker(Color.popups.text, 1.4)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.subtitle
-              font.bold: true
-              elide: Text.ElideRight
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            PanelSeparator {
+              foreground: Color.popups.text
+            }
+
+            PanelSectionHeader {
+              text: "PLAYBACK"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Mirror preview"
+              description: "Flip the image horizontally, like a familiar self-view."
+              checked: root.mirrorEnabled
+              foreground: Color.popups.text
+              enabled: !root.actionBusy
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.setMirror(!root.mirrorEnabled)
+            }
+
+            Dropdown {
+              id: latencyDropdown
+              width: parent.width
+              label: "Latency"
+              value: root.latencyMode
+              options: [
+                { value: "untimed", label: "Realtime (no buffer)" },
+                { value: "smooth", label: "Smoother (adds latency)" }
+              ]
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy
+              onChanged: function(value) { root.setLatency(value) }
+            }
+
+            Button {
+              width: parent.width
+              text: root.actionBusy ? "Applying…"
+                : root.streamRunning ? "Stop camera preview"
+                : "Start camera preview"
+              iconText: root.actionBusy ? "\uf110" : root.streamRunning ? "\uf04d" : "\uf04b"
+              iconSpinning: root.actionBusy
+              selected: root.streamRunning
+              bordered: true
+              focusable: true
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy && (!root.noCamera || root.streamRunning)
+              onClicked: root.toggleStream()
+            }
+          }
+
+          Column {
+            id: activityCaptureControls
+            visible: root.selectedTab !== "camera"
+            width: parent.width
+            spacing: Style.spacing.panelGap
+
+            PanelSeparator {
+              foreground: Color.popups.text
+            }
+
+            PanelSectionHeader {
+              text: "CAPTURE"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+
+            Dropdown {
+              width: parent.width
+              label: "Area"
+              value: root.captureMode
+              options: [
+                { value: "fullscreen", label: "Full screen (focused monitor)" },
+                { value: "window", label: "Window picker" },
+                { value: "region", label: "Region picker" }
+              ]
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onChanged: function(value) { root.setActivitySetting("capture", value) }
+            }
+
+            Dropdown {
+              width: parent.width
+              label: "Audio"
+              value: root.audioMode
+              options: [
+                { value: "none", label: "No audio" },
+                { value: "microphone", label: "Microphone" },
+                { value: "desktop", label: "Desktop audio" },
+                { value: "both", label: "Desktop + microphone" }
+              ]
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onChanged: function(value) { root.setActivitySetting("audio", value) }
+            }
+
+            Dropdown {
+              width: parent.width
+              label: "Video quality"
+              value: root.qualityMode
+              options: [
+                { value: "720p30", label: "720p · 30 fps" },
+                { value: "1080p30", label: "1080p · 30 fps" },
+                { value: "1080p60", label: "1080p · 60 fps (recommended)" }
+              ]
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onChanged: function(value) { root.setActivitySetting("quality", value) }
+            }
+          }
+
+          Column {
+            id: recordTab
+            visible: root.selectedTab === "record"
+            width: parent.width
+            spacing: Style.spacing.panelGap
+
+            Text {
+              visible: root.activityOutputPath !== ""
+              width: parent.width
+              text: (root.recordActive ? "Output: " : "Last output: ") + root.activityOutputPath
+              color: Qt.darker(Color.popups.text, 1.4)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WrapAnywhere
+              maximumLineCount: 2
+              elide: Text.ElideMiddle
+            }
+
+            Row {
+              visible: root.recordActive
+              width: parent.width
+              spacing: Style.spacing.controlGap
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: root.activityPaused ? "Resume" : "Pause"
+                iconText: root.activityPaused ? "\uf04b" : "\uf04c"
+                bordered: true
+                focusable: true
+                foreground: Color.popups.text
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                enabled: !root.actionBusy
+                onClicked: root.toggleRecordingPause()
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Stop recording"
+                iconText: "\uf04d"
+                selected: true
+                bordered: true
+                focusable: true
+                foreground: root.bar ? root.bar.urgent : Color.urgent
+                accent: root.bar ? root.bar.urgent : Color.urgent
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                enabled: !root.actionBusy
+                onClicked: root.stopRecording()
+              }
+            }
+
+            Button {
+              visible: !root.recordActive
+              width: parent.width
+              text: root.liveActive ? "Stop live stream before recording"
+                : root.actionBusy ? "Starting…"
+                : "Start recording"
+              iconText: root.actionBusy ? "\uf110" : "\uf111"
+              iconSpinning: root.actionBusy
+              bordered: true
+              focusable: true
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onClicked: root.startRecording()
             }
 
             Text {
               width: parent.width
-              text: root.stateDetail
-              color: Qt.darker(Color.popups.text, 1.35)
+              text: "The camera preview keeps its current state and position."
+              color: Qt.darker(Color.popups.text, 1.5)
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
-              font.pixelSize: Style.font.bodySmall
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
               wrapMode: Text.WordWrap
             }
           }
-        }
 
-        PanelSeparator {
-          foreground: Color.popups.text
-        }
+          Column {
+            id: liveTab
+            visible: root.selectedTab === "live"
+            width: parent.width
+            spacing: Style.spacing.panelGap
 
-        PanelSectionHeader {
-          text: "CAMERA"
-          foreground: Color.popups.text
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-        }
+            PanelSeparator {
+              foreground: Color.popups.text
+            }
 
-        Dropdown {
-          id: cameraDropdown
-          width: parent.width
-          label: "Input"
-          value: root.cameraChoice
-          options: root.cameraOptions
-          foreground: Color.popups.text
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          enabled: !root.actionBusy && root.cameraOptions.length > 0
-          onChanged: function(value) {
-            root.cameraChoice = value
-            root.selectCamera(value)
+            PanelSectionHeader {
+              text: "DESTINATION"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+
+            ButtonGroup {
+              width: parent.width
+              value: root.liveDestination
+              options: [
+                { value: "x", label: "X" },
+                { value: "custom", label: "Custom RTMP(S)" }
+              ]
+              foreground: Color.popups.text
+              background: Color.popups.background
+              accent: Color.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              onChanged: function(value) { root.setActivitySetting("destination", value) }
+            }
+
+            BorderSurface {
+              width: parent.width
+              implicitHeight: profileStatusRow.implicitHeight + Style.spacing.rowPaddingX * 2
+              radius: Style.cornerRadius
+              color: root.selectedProfileConfigured
+                ? Util.alpha(Color.accent, 0.08)
+                : Util.alpha(Color.popups.text, 0.035)
+              borderSpec: Border.flat(root.selectedProfileConfigured
+                ? Util.alpha(Color.accent, 0.32)
+                : Util.alpha(Color.popups.text, 0.12), 1)
+
+              Row {
+                id: profileStatusRow
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.spacing.rowPaddingX
+                anchors.rightMargin: Style.spacing.rowPaddingX
+                spacing: Style.spacing.controlGap
+
+                Text {
+                  text: root.selectedProfileConfigured ? "\uf058" : "\uf05a"
+                  color: root.selectedProfileConfigured ? Color.accent : Qt.darker(Color.popups.text, 1.35)
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.body
+                }
+
+                Text {
+                  width: parent.width - x - Style.spacing.controlGap
+                  text: root.destinationLabel(root.liveDestination)
+                    + (root.selectedProfileConfigured ? " is configured" : " needs a server and stream key")
+                  color: Color.popups.text
+                  font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Save a local copy"
+              description: "Record the same encoded stream locally. Enabled by default."
+              checked: root.localCopyEnabled
+              foreground: Color.popups.text
+              enabled: root.activitySettingsLoaded && !root.actionBusy && !root.activityActive
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              onClicked: root.setActivitySetting("local-copy", root.localCopyEnabled ? "false" : "true")
+            }
+
+            PanelSeparator {
+              foreground: Color.popups.text
+            }
+
+            PanelSectionHeader {
+              text: "RTMP(S) PROFILE"
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+            }
+
+            Text {
+              width: parent.width
+              text: "Server URL"
+              color: Qt.darker(Color.popups.text, 1.4)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            TextField {
+              id: serverField
+              width: parent.width
+              placeholderText: root.selectedProfileConfigured
+                ? "Configured — paste a new URL to replace"
+                : root.liveDestination === "x" ? "rtmps://…" : "rtmps://… or rtmp://…"
+              foreground: Color.popups.text
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy && !root.activityActive
+              onAccepted: if (streamKeyField.text.length > 0) root.configureLive()
+            }
+
+            Text {
+              width: parent.width
+              text: "Stream key"
+              color: Qt.darker(Color.popups.text, 1.4)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            TextField {
+              id: streamKeyField
+              width: parent.width
+              password: true
+              placeholderText: root.selectedProfileConfigured
+                ? "Stored in keyring — paste a new key to replace"
+                : "Paste once — stored in your system keyring"
+              foreground: Color.popups.text
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy && !root.activityActive
+              onAccepted: root.configureLive()
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.spacing.controlGap
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: root.actionBusy ? "Saving…" : "Save profile"
+                iconText: root.actionBusy ? "\uf110" : "\uf0c7"
+                iconSpinning: root.actionBusy
+                bordered: true
+                focusable: true
+                foreground: Color.popups.text
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                enabled: !root.actionBusy && !root.activityActive
+                  && serverField.text.trim().length > 0 && streamKeyField.text.length > 0
+                onClicked: root.configureLive()
+              }
+
+              Button {
+                width: (parent.width - parent.spacing) / 2
+                text: "Clear profile"
+                iconText: "\uf2ed"
+                bordered: true
+                focusable: true
+                foreground: Color.popups.text
+                fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+                enabled: !root.actionBusy && !root.activityActive
+                onClicked: root.clearLiveProfile()
+              }
+            }
+
+            Button {
+              visible: root.liveDestination === "x"
+              width: parent.width
+              text: "Open X Live Studio"
+              iconText: "\uf35d"
+              bordered: true
+              focusable: true
+              foreground: Color.popups.text
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !urlProc.running
+              onClicked: root.openXLiveStudio()
+            }
+
+            Text {
+              visible: root.liveDestination === "x"
+              width: parent.width
+              text: "Cam Stream sends the video. Publishing and ending the broadcast still happen in X."
+              color: Qt.darker(Color.popups.text, 1.4)
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WordWrap
+            }
+
+            Button {
+              width: parent.width
+              text: root.liveActive ? "Stop sending"
+                : root.recordActive ? "Stop recording before streaming"
+                : root.actionBusy ? "Starting…"
+                : "Start sending to " + root.destinationLabel(root.liveDestination)
+              iconText: root.actionBusy ? "\uf110" : root.liveActive ? "\uf04d" : "\uf519"
+              iconSpinning: root.actionBusy
+              selected: root.liveActive
+              bordered: true
+              focusable: true
+              foreground: root.liveActive ? (root.bar ? root.bar.urgent : Color.urgent) : Color.popups.text
+              accent: root.liveActive ? (root.bar ? root.bar.urgent : Color.urgent) : Color.accent
+              fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+              enabled: !root.actionBusy && (root.liveActive
+                || (!root.activityActive && root.activitySettingsLoaded && root.selectedProfileConfigured))
+              onClicked: root.toggleLive()
+            }
           }
-        }
 
-        Text {
-          visible: root.camerasLoaded && root.cameraOptions.length === 0
-          width: parent.width
-          text: "No video-capable input is available. Cam Stream ignores metadata-only camera nodes."
-          color: Qt.darker(Color.popups.text, 1.4)
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
-        PanelSeparator {
-          foreground: Color.popups.text
-        }
-
-        PanelSectionHeader {
-          text: "PLAYBACK"
-          foreground: Color.popups.text
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-        }
-
-        Toggle {
-          width: parent.width
-          label: "Mirror preview"
-          description: "Flip the image horizontally, like a familiar self-view."
-          checked: root.mirrorEnabled
-          foreground: Color.popups.text
-          enabled: !root.actionBusy
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          onClicked: root.setMirror(!root.mirrorEnabled)
-        }
-
-        Dropdown {
-          id: latencyDropdown
-          width: parent.width
-          label: "Latency"
-          value: root.latencyMode
-          options: [
-            { value: "untimed", label: "Realtime (no buffer)" },
-            { value: "smooth", label: "Smoother (adds latency)" }
-          ]
-          foreground: Color.popups.text
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          enabled: !root.actionBusy
-          onChanged: function(value) { root.setLatency(value) }
-        }
-
-        Button {
-          width: parent.width
-          text: root.actionBusy ? "Applying…"
-            : root.streamRunning ? "Stop camera preview"
-            : "Start camera preview"
-          iconText: root.actionBusy ? "\uf110" : root.streamRunning ? "\uf04d" : "\uf04b"
-          iconSpinning: root.actionBusy
-          selected: root.streamRunning
-          bordered: true
-          focusable: true
-          foreground: Color.popups.text
-          fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-          enabled: !root.actionBusy && (!root.noCamera || root.streamRunning)
-          onClicked: root.toggleStream()
-        }
-
-        Text {
-          width: parent.width
-          text: "Left click the bar icon to toggle · Right click for this panel"
-          color: Qt.darker(Color.popups.text, 1.55)
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.caption
-          horizontalAlignment: Text.AlignHCenter
-          wrapMode: Text.WordWrap
+          Text {
+            width: parent.width
+            text: "Left click the bar icon always toggles the camera · Right click opens this panel"
+            color: Qt.darker(Color.popups.text, 1.55)
+            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            font.pixelSize: Style.font.caption
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.WordWrap
+          }
         }
       }
     }

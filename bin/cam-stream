@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="cam-stream"
-VERSION="1.0.2"
+VERSION="1.1.0"
 APP_ID="io.github.tomdavenport.cam-stream"
 WINDOW_TITLE="Cam Stream Camera Preview"
 
@@ -48,16 +48,46 @@ RUNTIME_DIR="$RUNTIME_BASE/cam-stream"
 chmod 700 "$RUNTIME_DIR"
 IPC="$RUNTIME_DIR/mpv.sock"
 LOCK_FILE="$RUNTIME_DIR/control.lock"
+ACTIVITY_IPC="$RUNTIME_DIR/gsr.sock"
+ACTIVITY_LOCK_FILE="$RUNTIME_DIR/activity.lock"
+
+ACTIVITY_PID_FILE="$STATE_DIR/activity.pid"
+ACTIVITY_STATE_FILE="$STATE_DIR/activity"
+ACTIVITY_LAST_FILE="$STATE_DIR/activity.last"
+ACTIVITY_LOG_FILE="$STATE_DIR/activity.log"
+
+GSR_BIN="${CAM_STREAM_GSR_BIN:-gpu-screen-recorder}"
+GSR_CLI_BIN="${CAM_STREAM_GSR_CLI_BIN:-gsr-cli}"
+SECRET_TOOL_BIN="${CAM_STREAM_SECRET_TOOL_BIN:-secret-tool}"
+FFMPEG_BIN="${CAM_STREAM_FFMPEG_BIN:-ffmpeg}"
+CAPTURE_PICKER_BIN="${CAM_STREAM_CAPTURE_PICKER_BIN:-omarchy-capture-region}"
+FOCUSED_MONITOR_BIN="${CAM_STREAM_FOCUSED_MONITOR_BIN:-omarchy-hyprland-monitor-focused}"
+HYPRCTL_BIN="${CAM_STREAM_HYPRCTL_BIN:-hyprctl}"
+JQ_BIN="${CAM_STREAM_JQ_BIN:-jq}"
+SLURP_BIN="${CAM_STREAM_SLURP_BIN:-slurp}"
+XDG_USER_DIR_BIN="${CAM_STREAM_XDG_USER_DIR_BIN:-xdg-user-dir}"
 
 DEFAULT_MIRROR="false"
 DEFAULT_LATENCY="untimed"
 DEFAULT_WINDOW_SIZE="480x270"
+DEFAULT_ACTIVITY_CAPTURE="fullscreen"
+DEFAULT_ACTIVITY_AUDIO="none"
+DEFAULT_ACTIVITY_QUALITY="1080p60"
+DEFAULT_ACTIVITY_DESTINATION="x"
+DEFAULT_ACTIVITY_LOCAL_COPY="true"
 CONFIG_CAMERA=""
 CONFIG_CARD=""
 CONFIG_BUS=""
 CONFIG_MIRROR="$DEFAULT_MIRROR"
 CONFIG_LATENCY="$DEFAULT_LATENCY"
 CONFIG_WINDOW_SIZE="$DEFAULT_WINDOW_SIZE"
+CONFIG_ACTIVITY_CAPTURE="$DEFAULT_ACTIVITY_CAPTURE"
+CONFIG_ACTIVITY_AUDIO="$DEFAULT_ACTIVITY_AUDIO"
+CONFIG_ACTIVITY_QUALITY="$DEFAULT_ACTIVITY_QUALITY"
+CONFIG_ACTIVITY_DESTINATION="$DEFAULT_ACTIVITY_DESTINATION"
+CONFIG_ACTIVITY_LOCAL_COPY="$DEFAULT_ACTIVITY_LOCAL_COPY"
+CONFIG_LIVE_SERVER_X=""
+CONFIG_LIVE_SERVER_CUSTOM=""
 
 MIRROR="$DEFAULT_MIRROR"
 LATENCY="$DEFAULT_LATENCY"
@@ -83,6 +113,17 @@ Usage:
   cam-stream settings show [--json]
   cam-stream settings set mirror <true|false>
   cam-stream settings set latency <untimed|smooth>
+  cam-stream activity settings [--json]
+  cam-stream activity set capture <fullscreen|window|region>
+  cam-stream activity set audio <none|microphone|desktop|both>
+  cam-stream activity set quality <720p30|1080p30|1080p60>
+  cam-stream activity set destination <x|custom>
+  cam-stream activity set local-copy <true|false>
+  cam-stream record start|pause|resume|stop|status [--json]
+  cam-stream live configure <x|custom> --server URL --key-stdin
+  cam-stream live clear <x|custom>
+  cam-stream live start [x|custom] [--no-local-copy]
+  cam-stream live stop|status [--json]
   cam-stream doctor [camera] [--json]
   cam-stream logs [lines]
 
@@ -150,6 +191,13 @@ load_config() {
   CONFIG_MIRROR="$DEFAULT_MIRROR"
   CONFIG_LATENCY="$DEFAULT_LATENCY"
   CONFIG_WINDOW_SIZE="$DEFAULT_WINDOW_SIZE"
+  CONFIG_ACTIVITY_CAPTURE="$DEFAULT_ACTIVITY_CAPTURE"
+  CONFIG_ACTIVITY_AUDIO="$DEFAULT_ACTIVITY_AUDIO"
+  CONFIG_ACTIVITY_QUALITY="$DEFAULT_ACTIVITY_QUALITY"
+  CONFIG_ACTIVITY_DESTINATION="$DEFAULT_ACTIVITY_DESTINATION"
+  CONFIG_ACTIVITY_LOCAL_COPY="$DEFAULT_ACTIVITY_LOCAL_COPY"
+  CONFIG_LIVE_SERVER_X=""
+  CONFIG_LIVE_SERVER_CUSTOM=""
 
   [[ -r $CONFIG_FILE ]] || return 0
   while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
@@ -167,6 +215,23 @@ load_config() {
       window_size)
         [[ $value =~ ^[0-9]+x[0-9]+$ ]] && CONFIG_WINDOW_SIZE="$value"
         ;;
+      activity_capture)
+        [[ $value == "fullscreen" || $value == "window" || $value == "region" ]] && CONFIG_ACTIVITY_CAPTURE="$value"
+        ;;
+      activity_audio)
+        [[ $value == "none" || $value == "microphone" || $value == "desktop" || $value == "both" ]] && CONFIG_ACTIVITY_AUDIO="$value"
+        ;;
+      activity_quality)
+        [[ $value == "720p30" || $value == "1080p30" || $value == "1080p60" ]] && CONFIG_ACTIVITY_QUALITY="$value"
+        ;;
+      activity_destination)
+        [[ $value == "x" || $value == "custom" ]] && CONFIG_ACTIVITY_DESTINATION="$value"
+        ;;
+      activity_local_copy)
+        [[ $value == "true" || $value == "false" ]] && CONFIG_ACTIVITY_LOCAL_COPY="$value"
+        ;;
+      live_server_x) CONFIG_LIVE_SERVER_X="$value" ;;
+      live_server_custom) CONFIG_LIVE_SERVER_CUSTOM="$value" ;;
     esac
   done < "$CONFIG_FILE"
 }
@@ -179,6 +244,8 @@ write_config() {
   config_value_safe "$CONFIG_CAMERA" || return 1
   config_value_safe "$CONFIG_CARD" || return 1
   config_value_safe "$CONFIG_BUS" || return 1
+  config_value_safe "$CONFIG_LIVE_SERVER_X" || return 1
+  config_value_safe "$CONFIG_LIVE_SERVER_CUSTOM" || return 1
   mkdir -p "$CONFIG_DIR"
   chmod 700 "$CONFIG_DIR" 2>/dev/null || true
   local tmp="$CONFIG_DIR/.config.$$"
@@ -191,6 +258,13 @@ write_config() {
       printf 'mirror=%s\n' "$CONFIG_MIRROR"
       printf 'latency=%s\n' "$CONFIG_LATENCY"
       printf 'window_size=%s\n' "$CONFIG_WINDOW_SIZE"
+      printf 'activity_capture=%s\n' "$CONFIG_ACTIVITY_CAPTURE"
+      printf 'activity_audio=%s\n' "$CONFIG_ACTIVITY_AUDIO"
+      printf 'activity_quality=%s\n' "$CONFIG_ACTIVITY_QUALITY"
+      printf 'activity_destination=%s\n' "$CONFIG_ACTIVITY_DESTINATION"
+      printf 'activity_local_copy=%s\n' "$CONFIG_ACTIVITY_LOCAL_COPY"
+      printf 'live_server_x=%s\n' "$CONFIG_LIVE_SERVER_X"
+      printf 'live_server_custom=%s\n' "$CONFIG_LIVE_SERVER_CUSTOM"
     } > "$tmp"
   )
   mv -f "$tmp" "$CONFIG_FILE"
@@ -523,6 +597,1012 @@ settings_set() {
   printf 'Saved %s=%s\n' "$key" "$value"
 }
 
+tool_available() {
+  local tool="$1"
+  if [[ $tool == */* ]]; then
+    [[ -x $tool ]]
+  else
+    command -v "$tool" >/dev/null 2>&1
+  fi
+}
+
+tool_path() {
+  local tool="$1"
+  if [[ $tool == */* ]]; then
+    readlink -f "$tool" 2>/dev/null || printf '%s\n' "$tool"
+  else
+    command -v "$tool" 2>/dev/null
+  fi
+}
+
+# Resolve this once. Process ownership checks may inspect many /proc entries,
+# and spawning readlink/command -v for each one is both slow and unnecessary.
+GSR_RESOLVED_BIN="$(tool_path "$GSR_BIN" 2>/dev/null || true)"
+
+secret_lookup_key() {
+  local profile="$1"
+  tool_available "$SECRET_TOOL_BIN" || return 1
+  "$SECRET_TOOL_BIN" lookup application "$PROGRAM" profile "$profile" 2>/dev/null
+}
+
+secret_profile_configured() {
+  local profile="$1" server="$2" key=""
+  [[ -n $server ]] || return 1
+  key="$(secret_lookup_key "$profile" 2>/dev/null || true)"
+  if [[ -n $key ]]; then
+    key=""
+    return 0
+  fi
+  return 1
+}
+
+activity_settings_command() {
+  local json="false" x_configured="false" custom_configured="false"
+  case "${1:-}" in
+    "") ;;
+    --json) json="true" ;;
+    *) die_usage "unexpected activity settings argument: $1" ;;
+  esac
+  load_config
+  secret_profile_configured x "$CONFIG_LIVE_SERVER_X" && x_configured="true"
+  secret_profile_configured custom "$CONFIG_LIVE_SERVER_CUSTOM" && custom_configured="true"
+  if [[ $json == "true" ]]; then
+    printf '{"schemaVersion":1,"captureMode":"%s","audioMode":"%s","quality":"%s","destination":"%s","localCopy":%s,"profiles":{"x":{"configured":%s},"custom":{"configured":%s}}}\n' \
+      "$CONFIG_ACTIVITY_CAPTURE" "$CONFIG_ACTIVITY_AUDIO" "$CONFIG_ACTIVITY_QUALITY" \
+      "$CONFIG_ACTIVITY_DESTINATION" "$CONFIG_ACTIVITY_LOCAL_COPY" "$x_configured" "$custom_configured"
+  else
+    printf 'Capture: %s\nAudio: %s\nQuality: %s\nDestination: %s\nLocal copy: %s\n' \
+      "$CONFIG_ACTIVITY_CAPTURE" "$CONFIG_ACTIVITY_AUDIO" "$CONFIG_ACTIVITY_QUALITY" \
+      "$CONFIG_ACTIVITY_DESTINATION" "$CONFIG_ACTIVITY_LOCAL_COPY"
+    printf 'X profile: %s\nCustom profile: %s\n' \
+      "$([[ $x_configured == "true" ]] && printf configured || printf 'not configured')" \
+      "$([[ $custom_configured == "true" ]] && printf configured || printf 'not configured')"
+  fi
+}
+
+activity_set_command() {
+  local key="${1:-}" value="${2:-}"
+  (( $# == 2 )) || die_usage "activity set expects a key and value"
+  load_config
+  case "$key" in
+    capture)
+      [[ $value == "fullscreen" || $value == "window" || $value == "region" ]] || die_usage "capture must be fullscreen, window, or region"
+      CONFIG_ACTIVITY_CAPTURE="$value"
+      ;;
+    audio)
+      [[ $value == "none" || $value == "microphone" || $value == "desktop" || $value == "both" ]] || die_usage "audio must be none, microphone, desktop, or both"
+      CONFIG_ACTIVITY_AUDIO="$value"
+      ;;
+    quality)
+      [[ $value == "720p30" || $value == "1080p30" || $value == "1080p60" ]] || die_usage "quality must be 720p30, 1080p30, or 1080p60"
+      CONFIG_ACTIVITY_QUALITY="$value"
+      ;;
+    destination)
+      [[ $value == "x" || $value == "custom" ]] || die_usage "destination must be x or custom"
+      CONFIG_ACTIVITY_DESTINATION="$value"
+      ;;
+    local-copy|local_copy)
+      [[ $value == "true" || $value == "false" ]] || die_usage "local-copy must be true or false"
+      CONFIG_ACTIVITY_LOCAL_COPY="$value"
+      ;;
+    *) die_usage "unknown activity setting: $key" ;;
+  esac
+  write_config
+  printf 'Saved %s=%s\n' "$key" "$value"
+}
+
+ACTIVE_ACTIVITY_MODE=""
+ACTIVE_ACTIVITY_STATE=""
+ACTIVE_ACTIVITY_STARTED=""
+ACTIVE_ACTIVITY_CAPTURE=""
+ACTIVE_ACTIVITY_TARGET=""
+ACTIVE_ACTIVITY_AUDIO=""
+ACTIVE_ACTIVITY_QUALITY=""
+ACTIVE_ACTIVITY_DESTINATION=""
+ACTIVE_ACTIVITY_LOCAL_COPY=""
+ACTIVE_ACTIVITY_OUTPUT=""
+
+load_activity_state() {
+  local key value
+  ACTIVE_ACTIVITY_MODE=""
+  ACTIVE_ACTIVITY_STATE=""
+  ACTIVE_ACTIVITY_STARTED=""
+  ACTIVE_ACTIVITY_CAPTURE=""
+  ACTIVE_ACTIVITY_TARGET=""
+  ACTIVE_ACTIVITY_AUDIO=""
+  ACTIVE_ACTIVITY_QUALITY=""
+  ACTIVE_ACTIVITY_DESTINATION=""
+  ACTIVE_ACTIVITY_LOCAL_COPY=""
+  ACTIVE_ACTIVITY_OUTPUT=""
+  [[ -r $ACTIVITY_STATE_FILE ]] || return 0
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    case "$key" in
+      mode) ACTIVE_ACTIVITY_MODE="$value" ;;
+      state) ACTIVE_ACTIVITY_STATE="$value" ;;
+      started) ACTIVE_ACTIVITY_STARTED="$value" ;;
+      capture) ACTIVE_ACTIVITY_CAPTURE="$value" ;;
+      target) ACTIVE_ACTIVITY_TARGET="$value" ;;
+      audio) ACTIVE_ACTIVITY_AUDIO="$value" ;;
+      quality) ACTIVE_ACTIVITY_QUALITY="$value" ;;
+      destination) ACTIVE_ACTIVITY_DESTINATION="$value" ;;
+      local_copy) ACTIVE_ACTIVITY_LOCAL_COPY="$value" ;;
+      output) ACTIVE_ACTIVITY_OUTPUT="$value" ;;
+    esac
+  done < "$ACTIVITY_STATE_FILE"
+}
+
+write_activity_state() {
+  local value tmp
+  for value in "$ACTIVE_ACTIVITY_MODE" "$ACTIVE_ACTIVITY_STATE" "$ACTIVE_ACTIVITY_STARTED" \
+    "$ACTIVE_ACTIVITY_CAPTURE" "$ACTIVE_ACTIVITY_TARGET" "$ACTIVE_ACTIVITY_AUDIO" \
+    "$ACTIVE_ACTIVITY_QUALITY" "$ACTIVE_ACTIVITY_DESTINATION" "$ACTIVE_ACTIVITY_LOCAL_COPY" \
+    "$ACTIVE_ACTIVITY_OUTPUT"; do
+    config_value_safe "$value" || return 1
+  done
+  (umask 077; mkdir -p "$STATE_DIR")
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  tmp="$STATE_DIR/.activity.$$"
+  (umask 077
+    {
+      printf 'mode=%s\n' "$ACTIVE_ACTIVITY_MODE"
+      printf 'state=%s\n' "$ACTIVE_ACTIVITY_STATE"
+      printf 'started=%s\n' "$ACTIVE_ACTIVITY_STARTED"
+      printf 'capture=%s\n' "$ACTIVE_ACTIVITY_CAPTURE"
+      printf 'target=%s\n' "$ACTIVE_ACTIVITY_TARGET"
+      printf 'audio=%s\n' "$ACTIVE_ACTIVITY_AUDIO"
+      printf 'quality=%s\n' "$ACTIVE_ACTIVITY_QUALITY"
+      printf 'destination=%s\n' "$ACTIVE_ACTIVITY_DESTINATION"
+      printf 'local_copy=%s\n' "$ACTIVE_ACTIVITY_LOCAL_COPY"
+      printf 'output=%s\n' "$ACTIVE_ACTIVITY_OUTPUT"
+    } > "$tmp"
+  )
+  mv -f "$tmp" "$ACTIVITY_STATE_FILE"
+}
+
+LAST_ACTIVITY_OUTPUT=""
+LAST_ACTIVITY_ERROR=""
+
+load_activity_last() {
+  local key value
+  LAST_ACTIVITY_OUTPUT=""
+  LAST_ACTIVITY_ERROR=""
+  [[ -r $ACTIVITY_LAST_FILE ]] || return 0
+  while IFS='=' read -r key value || [[ -n ${key:-} ]]; do
+    case "$key" in
+      output) LAST_ACTIVITY_OUTPUT="$value" ;;
+      error) LAST_ACTIVITY_ERROR="$value" ;;
+    esac
+  done < "$ACTIVITY_LAST_FILE"
+}
+
+write_activity_last() {
+  local mode="$1" output="$2" error="$3" tmp value
+  for value in "$mode" "$output" "$error"; do config_value_safe "$value" || return 1; done
+  (umask 077; mkdir -p "$STATE_DIR")
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  tmp="$STATE_DIR/.activity.last.$$"
+  (umask 077
+    {
+      printf 'mode=%s\n' "$mode"
+      printf 'output=%s\n' "$output"
+      printf 'error=%s\n' "$error"
+    } > "$tmp"
+  )
+  mv -f "$tmp" "$ACTIVITY_LAST_FILE"
+}
+
+rotate_activity_log() {
+  (umask 077; mkdir -p "$STATE_DIR")
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+  if [[ -f $ACTIVITY_LOG_FILE ]] && (( $(stat -c %s "$ACTIVITY_LOG_FILE" 2>/dev/null || printf 0) > 1048576 )); then
+    mv -f "$ACTIVITY_LOG_FILE" "$ACTIVITY_LOG_FILE.1"
+  fi
+}
+
+activity_log() {
+  rotate_activity_log
+  printf '[%s] %s\n' "$(date -Is)" "$1" >> "$ACTIVITY_LOG_FILE"
+}
+
+pid_is_gsr() {
+  local pid="$1" expected="$GSR_RESOLVED_BIN" first="" second="" second_real=""
+  local -a argv=()
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
+  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  (( ${#argv[@]} > 0 )) || return 1
+  first="${argv[0]}"
+  second="${argv[1]:-}"
+  [[ ${first##*/} == "gpu-screen-recorder" ]] && return 0
+  [[ -n $expected ]] || return 1
+  [[ $first == "$expected" ]] && return 0
+  if [[ -n $second && ( ${first##*/} == "bash" || ${first##*/} == "sh" ) && \
+    ( ${second##*/} == "gpu-screen-recorder" || ${second##*/} == "${GSR_BIN##*/}" ) ]]; then
+    second_real="$(readlink -f "$second" 2>/dev/null || printf '%s' "$second")"
+    [[ $second_real == "$expected" ]] && return 0
+  fi
+  return 1
+}
+
+activity_process_matches() {
+  local pid="$1" index
+  local -a argv=()
+  pid_is_gsr "$pid" || return 1
+  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
+  for ((index=0; index<${#argv[@]}; index++)); do
+    if [[ ${argv[index]} == "-ipc=$ACTIVITY_IPC" ]]; then return 0; fi
+    if [[ ${argv[index]} == "-ipc" && ${argv[index+1]:-} == "$ACTIVITY_IPC" ]]; then return 0; fi
+  done
+  return 1
+}
+
+activity_running_pid() {
+  local pid="" cmdline
+  if [[ -r $ACTIVITY_PID_FILE ]]; then
+    read -r pid < "$ACTIVITY_PID_FILE" || true
+    if activity_process_matches "$pid"; then printf '%s\n' "$pid"; return; fi
+  fi
+  # A healthy launch always writes both state and PID before waiting for IPC.
+  # Only perform recovery scanning when one of our ownership markers exists.
+  [[ -e $ACTIVITY_PID_FILE || -e $ACTIVITY_STATE_FILE || -e $ACTIVITY_IPC ]] || return 1
+  for cmdline in /proc/[0-9]*/cmdline; do
+    pid="${cmdline#/proc/}"
+    pid="${pid%/cmdline}"
+    if activity_process_matches "$pid"; then printf '%s\n' "$pid"; return; fi
+  done
+  return 1
+}
+
+other_gsr_pids() {
+  local pid cmdline
+  for cmdline in /proc/[0-9]*/cmdline; do
+    pid="${cmdline#/proc/}"
+    pid="${pid%/cmdline}"
+    pid_is_gsr "$pid" || continue
+    activity_process_matches "$pid" && continue
+    printf '%s\n' "$pid"
+  done
+}
+
+clear_activity_runtime() {
+  rm -f -- "$ACTIVITY_PID_FILE" "$ACTIVITY_STATE_FILE" "$ACTIVITY_IPC"
+}
+
+refresh_activity_runtime() {
+  local pid=""
+  pid="$(activity_running_pid 2>/dev/null || true)"
+  if [[ -n $pid ]]; then
+    return 0
+  fi
+  if [[ -r $ACTIVITY_STATE_FILE ]]; then
+    load_activity_state
+    write_activity_last "${ACTIVE_ACTIVITY_MODE:-unknown}" "$ACTIVE_ACTIVITY_OUTPUT" "Recorder exited unexpectedly."
+    activity_log "recorder exited unexpectedly mode=${ACTIVE_ACTIVITY_MODE:-unknown}"
+  fi
+  clear_activity_runtime
+}
+
+STATUS_ACTIVITY_RUNNING="false"
+STATUS_ACTIVITY_MODE="idle"
+STATUS_ACTIVITY_STATE="idle"
+STATUS_ACTIVITY_PAUSED="false"
+STATUS_ACTIVITY_ELAPSED="0"
+STATUS_ACTIVITY_CAPTURE="$DEFAULT_ACTIVITY_CAPTURE"
+STATUS_ACTIVITY_AUDIO="$DEFAULT_ACTIVITY_AUDIO"
+STATUS_ACTIVITY_QUALITY="$DEFAULT_ACTIVITY_QUALITY"
+STATUS_ACTIVITY_DESTINATION="$DEFAULT_ACTIVITY_DESTINATION"
+STATUS_ACTIVITY_LOCAL_COPY="$DEFAULT_ACTIVITY_LOCAL_COPY"
+STATUS_ACTIVITY_OUTPUT=""
+STATUS_ACTIVITY_LAST_OUTPUT=""
+STATUS_ACTIVITY_ERROR=""
+STATUS_ACTIVITY_PID=""
+
+collect_activity_status() {
+  local now
+  load_config
+  refresh_activity_runtime
+  load_activity_last
+  STATUS_ACTIVITY_RUNNING="false"
+  STATUS_ACTIVITY_MODE="idle"
+  STATUS_ACTIVITY_STATE="idle"
+  STATUS_ACTIVITY_PAUSED="false"
+  STATUS_ACTIVITY_ELAPSED="0"
+  STATUS_ACTIVITY_CAPTURE="$CONFIG_ACTIVITY_CAPTURE"
+  STATUS_ACTIVITY_AUDIO="$CONFIG_ACTIVITY_AUDIO"
+  STATUS_ACTIVITY_QUALITY="$CONFIG_ACTIVITY_QUALITY"
+  STATUS_ACTIVITY_DESTINATION="$CONFIG_ACTIVITY_DESTINATION"
+  STATUS_ACTIVITY_LOCAL_COPY="$CONFIG_ACTIVITY_LOCAL_COPY"
+  STATUS_ACTIVITY_OUTPUT=""
+  STATUS_ACTIVITY_LAST_OUTPUT="$LAST_ACTIVITY_OUTPUT"
+  STATUS_ACTIVITY_ERROR="$LAST_ACTIVITY_ERROR"
+  STATUS_ACTIVITY_PID="$(activity_running_pid 2>/dev/null || true)"
+  if [[ -n $STATUS_ACTIVITY_PID ]]; then
+    load_activity_state
+    STATUS_ACTIVITY_RUNNING="true"
+    STATUS_ACTIVITY_MODE="${ACTIVE_ACTIVITY_MODE:-idle}"
+    STATUS_ACTIVITY_STATE="${ACTIVE_ACTIVITY_STATE:-error}"
+    [[ $STATUS_ACTIVITY_STATE == "paused" ]] && STATUS_ACTIVITY_PAUSED="true"
+    STATUS_ACTIVITY_CAPTURE="${ACTIVE_ACTIVITY_CAPTURE:-$CONFIG_ACTIVITY_CAPTURE}"
+    STATUS_ACTIVITY_AUDIO="${ACTIVE_ACTIVITY_AUDIO:-$CONFIG_ACTIVITY_AUDIO}"
+    STATUS_ACTIVITY_QUALITY="${ACTIVE_ACTIVITY_QUALITY:-$CONFIG_ACTIVITY_QUALITY}"
+    if [[ $STATUS_ACTIVITY_MODE == "live" ]]; then
+      STATUS_ACTIVITY_DESTINATION="${ACTIVE_ACTIVITY_DESTINATION:-$CONFIG_ACTIVITY_DESTINATION}"
+      STATUS_ACTIVITY_LOCAL_COPY="${ACTIVE_ACTIVITY_LOCAL_COPY:-false}"
+    else
+      STATUS_ACTIVITY_DESTINATION=""
+      STATUS_ACTIVITY_LOCAL_COPY="false"
+    fi
+    STATUS_ACTIVITY_OUTPUT="$ACTIVE_ACTIVITY_OUTPUT"
+    STATUS_ACTIVITY_ERROR=""
+    if [[ $ACTIVE_ACTIVITY_STARTED =~ ^[0-9]+$ ]]; then
+      now="$(date +%s)"
+      (( now >= ACTIVE_ACTIVITY_STARTED )) && STATUS_ACTIVITY_ELAPSED=$((now - ACTIVE_ACTIVITY_STARTED))
+    fi
+    if [[ -z $ACTIVE_ACTIVITY_MODE ]]; then
+      STATUS_ACTIVITY_MODE="idle"
+      STATUS_ACTIVITY_STATE="error"
+      STATUS_ACTIVITY_ERROR="Activity state is missing."
+    fi
+  elif [[ -n $STATUS_ACTIVITY_ERROR ]]; then
+    STATUS_ACTIVITY_STATE="error"
+  fi
+}
+
+emit_activity_status_json() {
+  local include_schema="${1:-false}"
+  collect_activity_status
+  printf '{'
+  [[ $include_schema == "true" ]] && printf '"schemaVersion":1,'
+  printf '"running":%s,"pid":' "$STATUS_ACTIVITY_RUNNING"
+  if [[ -n $STATUS_ACTIVITY_PID ]]; then printf '%s' "$STATUS_ACTIVITY_PID"; else printf 'null'; fi
+  printf ',"mode":"%s","state":"%s","paused":%s,"elapsedSeconds":%s,"captureMode":"%s","audioMode":"%s","quality":"%s","destination":' \
+    "$STATUS_ACTIVITY_MODE" "$STATUS_ACTIVITY_STATE" "$STATUS_ACTIVITY_PAUSED" \
+    "$STATUS_ACTIVITY_ELAPSED" "$STATUS_ACTIVITY_CAPTURE" "$STATUS_ACTIVITY_AUDIO" "$STATUS_ACTIVITY_QUALITY"
+  json_string_or_null "$STATUS_ACTIVITY_DESTINATION"
+  printf ',"localCopy":%s,"outputPath":' "$STATUS_ACTIVITY_LOCAL_COPY"
+  json_string_or_null "$STATUS_ACTIVITY_OUTPUT"
+  printf ',"lastOutputPath":'
+  json_string_or_null "$STATUS_ACTIVITY_LAST_OUTPUT"
+  printf ',"error":'
+  json_string_or_null "$STATUS_ACTIVITY_ERROR"
+  printf '}'
+}
+
+activity_status_command() {
+  local json="false"
+  case "${1:-}" in
+    "") ;;
+    --json) json="true" ;;
+    *) die_usage "unexpected activity status argument: $1" ;;
+  esac
+  if [[ $json == "true" ]]; then
+    emit_activity_status_json true
+    printf '\n'
+  else
+    collect_activity_status
+    printf 'Activity: %s\nMode: %s\nElapsed: %ss\nCapture: %s\nAudio: %s\nQuality: %s\n' \
+      "$STATUS_ACTIVITY_STATE" "$STATUS_ACTIVITY_MODE" "$STATUS_ACTIVITY_ELAPSED" \
+      "$STATUS_ACTIVITY_CAPTURE" "$STATUS_ACTIVITY_AUDIO" "$STATUS_ACTIVITY_QUALITY"
+    [[ -n $STATUS_ACTIVITY_DESTINATION ]] && printf 'Destination: %s\n' "$STATUS_ACTIVITY_DESTINATION"
+    printf 'Local copy: %s\n' "$STATUS_ACTIVITY_LOCAL_COPY"
+    [[ -n $STATUS_ACTIVITY_OUTPUT ]] && printf 'Output: %s\n' "$STATUS_ACTIVITY_OUTPUT"
+    [[ -n $STATUS_ACTIVITY_LAST_OUTPUT ]] && printf 'Last output: %s\n' "$STATUS_ACTIVITY_LAST_OUTPUT"
+    [[ -n $STATUS_ACTIVITY_ERROR ]] && printf 'Error: %s\n' "$STATUS_ACTIVITY_ERROR"
+  fi
+}
+
+activity_output_dir() {
+  local configured="${CAM_STREAM_OUTPUT_DIR:-}" discovered=""
+  if [[ -n $configured ]]; then
+    printf '%s\n' "$configured"
+    return
+  fi
+  if tool_available "$XDG_USER_DIR_BIN"; then
+    discovered="$("$XDG_USER_DIR_BIN" VIDEOS 2>/dev/null || true)"
+    if [[ $discovered == /* && $discovered != *$'\n'* && $discovered != *$'\r'* ]]; then
+      printf '%s\n' "$discovered"
+      return
+    fi
+  fi
+  printf '%s/Videos\n' "${HOME:?HOME is not set}"
+}
+
+ensure_activity_output_dir() {
+  local directory="$1"
+  if [[ -L $directory ]]; then
+    [[ -d $directory && -w $directory ]] || { printf '%s: output directory is not writable: %s\n' "$PROGRAM" "$directory" >&2; return 1; }
+    return
+  fi
+  (umask 077; mkdir -p "$directory") || { printf '%s: unable to create output directory: %s\n' "$PROGRAM" "$directory" >&2; return 1; }
+  [[ -d $directory && -w $directory ]] || { printf '%s: output directory is not writable: %s\n' "$PROGRAM" "$directory" >&2; return 1; }
+}
+
+unique_activity_output() {
+  local directory="$1" prefix="$2" extension="$3" candidate suffix=1
+  candidate="$directory/$prefix-$(date +'%Y-%m-%d_%H-%M-%S').$extension"
+  while [[ -e $candidate ]]; do
+    candidate="$directory/$prefix-$(date +'%Y-%m-%d_%H-%M-%S')-$suffix.$extension"
+    ((suffix += 1))
+  done
+  printf '%s\n' "$candidate"
+}
+
+CAPTURE_ARGS=()
+CAPTURE_TARGET=""
+
+built_in_focused_monitor() {
+  local monitors=""
+  tool_available "$HYPRCTL_BIN" && tool_available "$JQ_BIN" || return 1
+  monitors="$("$HYPRCTL_BIN" monitors -j 2>/dev/null || true)"
+  [[ -n $monitors ]] || return 1
+  "$JQ_BIN" -r 'first(.[] | select(.focused == true).name) // empty' <<< "$monitors" 2>/dev/null
+}
+
+built_in_window_selection() {
+  local monitors="" clients="" workspace="" rectangles=""
+  tool_available "$HYPRCTL_BIN" && tool_available "$JQ_BIN" && tool_available "$SLURP_BIN" || return 1
+  monitors="$("$HYPRCTL_BIN" monitors -j 2>/dev/null || true)"
+  clients="$("$HYPRCTL_BIN" clients -j 2>/dev/null || true)"
+  [[ -n $monitors && -n $clients ]] || return 1
+  workspace="$("$JQ_BIN" -r 'first(.[] | select(.focused == true).activeWorkspace.id) // empty' <<< "$monitors" 2>/dev/null || true)"
+  [[ $workspace =~ ^-?[0-9]+$ ]] || return 1
+  # shellcheck disable=SC2016 # jq interpolation belongs to jq, not Bash.
+  rectangles="$("$JQ_BIN" -r --argjson workspace "$workspace" '
+    .[] | select(.workspace.id == $workspace) |
+    "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"
+  ' <<< "$clients" 2>/dev/null || true)"
+  [[ -n $rectangles ]] || return 1
+  printf '%s\n' "$rectangles" | "$SLURP_BIN" -r -f '%x,%y %wx%h' 2>/dev/null
+}
+
+built_in_region_selection() {
+  tool_available "$SLURP_BIN" || return 1
+  "$SLURP_BIN" -f '%x,%y %wx%h' 2>/dev/null
+}
+
+normalize_capture_target() {
+  local raw="$1" mode="$2" x y width height
+  raw="${raw//$'\r'/}"
+  raw="${raw%$'\n'}"
+  [[ -n $raw && $raw != *$'\n'* ]] || return 1
+  case "$raw" in
+    monitor:*)
+      [[ ${raw#monitor:} =~ ^[[:alnum:]_.:-]+$ ]] || return 1
+      printf '%s\n' "$raw"
+      ;;
+    region:*)
+      [[ ${raw#region:} =~ ^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$ ]] || return 1
+      printf '%s\n' "$raw"
+      ;;
+    *)
+      if [[ $raw =~ ^[0-9]+x[0-9]+[+-][0-9]+[+-][0-9]+$ ]]; then
+        printf 'region:%s\n' "$raw"
+      elif [[ $raw =~ ^(-?[0-9]+),(-?[0-9]+)[[:space:]]+([0-9]+)x([0-9]+)$ ]]; then
+        x="${BASH_REMATCH[1]}"; y="${BASH_REMATCH[2]}"
+        width="${BASH_REMATCH[3]}"; height="${BASH_REMATCH[4]}"
+        printf 'region:%sx%s%+d%+d\n' "$width" "$height" "$x" "$y"
+      elif [[ $mode == "fullscreen" && $raw =~ ^[[:alnum:]_.:-]+$ ]]; then
+        printf 'monitor:%s\n' "$raw"
+      else
+        return 1
+      fi
+      ;;
+  esac
+}
+
+resolve_capture_target() {
+  local mode="$1" raw=""
+  if [[ -n ${CAM_STREAM_CAPTURE_TARGET:-} ]]; then
+    raw="$CAM_STREAM_CAPTURE_TARGET"
+  else
+    case "$mode" in
+      fullscreen)
+        if tool_available "$FOCUSED_MONITOR_BIN"; then
+          raw="$("$FOCUSED_MONITOR_BIN" 2>/dev/null || true)"
+        else
+          raw="$(built_in_focused_monitor 2>/dev/null || true)"
+        fi
+        ;;
+      window)
+        if tool_available "$CAPTURE_PICKER_BIN"; then
+          raw="$("$CAPTURE_PICKER_BIN" windows --match-monitor 2>/dev/null || true)"
+        else
+          raw="$(built_in_window_selection 2>/dev/null || true)"
+        fi
+        ;;
+      region)
+        if tool_available "$CAPTURE_PICKER_BIN"; then
+          raw="$("$CAPTURE_PICKER_BIN" region --match-monitor 2>/dev/null || true)"
+        else
+          raw="$(built_in_region_selection 2>/dev/null || true)"
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+  CAPTURE_TARGET="$(normalize_capture_target "$raw" "$mode" 2>/dev/null || true)"
+  if [[ -z $CAPTURE_TARGET ]]; then
+    printf '%s: capture selection was cancelled or invalid\n' "$PROGRAM" >&2
+    return 1
+  fi
+  case "$CAPTURE_TARGET" in
+    monitor:*) CAPTURE_ARGS=(-w "${CAPTURE_TARGET#monitor:}") ;;
+    region:*) CAPTURE_ARGS=(-w region -region "${CAPTURE_TARGET#region:}") ;;
+    *) return 1 ;;
+  esac
+}
+
+QUALITY_SIZE=""
+QUALITY_FPS=""
+QUALITY_BITRATE=""
+
+load_quality_args() {
+  case "$1" in
+    720p30) QUALITY_SIZE="1280x720"; QUALITY_FPS="30"; QUALITY_BITRATE="6000" ;;
+    1080p30) QUALITY_SIZE="1920x1080"; QUALITY_FPS="30"; QUALITY_BITRATE="8000" ;;
+    1080p60) QUALITY_SIZE="1920x1080"; QUALITY_FPS="60"; QUALITY_BITRATE="12000" ;;
+    *) return 1 ;;
+  esac
+}
+
+AUDIO_ARGS=()
+
+load_audio_args() {
+  case "$1" in
+    none) AUDIO_ARGS=() ;;
+    microphone) AUDIO_ARGS=(-a default_input -ac aac -ab 128) ;;
+    desktop) AUDIO_ARGS=(-a default_output -ac aac -ab 128) ;;
+    both) AUDIO_ARGS=(-a 'default_output|default_input' -ac aac -ab 128) ;;
+    *) return 1 ;;
+  esac
+}
+
+gsr_has_owned_ipc() {
+  local help_text=""
+  tool_available "$GSR_BIN" || return 1
+  tool_available "$GSR_CLI_BIN" || return 1
+  help_text="$("$GSR_BIN" --help 2>&1 || true)"
+  grep -q -- '-ipc' <<< "$help_text" || return 1
+  help_text="$("$GSR_CLI_BIN" --help 2>&1 || true)"
+  grep -q -- '-ipc' <<< "$help_text"
+}
+
+process_is_live() {
+  local pid="$1" stat rest state
+  [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/stat ]] || return 1
+  stat="$(<"/proc/$pid/stat")"
+  rest="${stat##*) }"
+  state="${rest%% *}"
+  [[ $state != "Z" && $state != "X" ]]
+}
+
+wait_for_activity_ipc() {
+  local pid="$1"
+  for _ in {1..100}; do
+    process_is_live "$pid" || { wait "$pid" 2>/dev/null || true; return 1; }
+    if [[ -S $ACTIVITY_IPC ]] && "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" status >/dev/null 2>&1; then return 0; fi
+    sleep 0.05
+  done
+  return 1
+}
+
+wait_for_activity_exit() {
+  local pid="$1"
+  for _ in {1..200}; do
+    process_is_live "$pid" || { wait "$pid" 2>/dev/null || true; return 0; }
+    sleep 0.05
+  done
+  return 1
+}
+
+stop_owned_pid_fallback() {
+  local pid="$1" signal
+  for signal in INT TERM KILL; do
+    process_is_live "$pid" || { wait "$pid" 2>/dev/null || true; return 0; }
+    activity_process_matches "$pid" || return 1
+    kill -s "$signal" "$pid" 2>/dev/null || true
+    for _ in {1..40}; do
+      process_is_live "$pid" || { wait "$pid" 2>/dev/null || true; return 0; }
+      sleep 0.05
+    done
+  done
+  process_is_live "$pid" && return 1
+  return 0
+}
+
+prepare_activity_start() {
+  local existing="" others=""
+  refresh_activity_runtime
+  existing="$(activity_running_pid 2>/dev/null || true)"
+  if [[ -n $existing ]]; then
+    load_activity_state
+    printf '%s: %s activity is already running\n' "$PROGRAM" "${ACTIVE_ACTIVITY_MODE:-another}" >&2
+    return 1
+  fi
+  others="$(other_gsr_pids 2>/dev/null || true)"
+  if [[ -n $others ]]; then
+    printf '%s: another screen recorder is active; stop it before starting Cam Stream\n' "$PROGRAM" >&2
+    return 1
+  fi
+  if ! gsr_has_owned_ipc; then
+    printf '%s: gpu-screen-recorder with IPC support and gsr-cli are required\n' "$PROGRAM" >&2
+    return 1
+  fi
+}
+
+launch_activity_gsr() {
+  local pid gsr_exec=""
+  gsr_exec="$GSR_RESOLVED_BIN"
+  [[ -n $gsr_exec && -x $gsr_exec ]] || { printf '%s: gpu-screen-recorder executable was not found\n' "$PROGRAM" >&2; return 1; }
+  rm -f -- "$ACTIVITY_IPC"
+  rotate_activity_log
+  write_activity_state
+  "$gsr_exec" "$@" </dev/null >/dev/null 2>/dev/null 8>&- 9>&- &
+  pid=$!
+  (umask 077; printf '%s\n' "$pid" > "$ACTIVITY_PID_FILE")
+  if ! wait_for_activity_ipc "$pid"; then
+    if process_is_live "$pid"; then
+      activity_log "recorder IPC did not become ready mode=$ACTIVE_ACTIVITY_MODE pid=$pid"
+      if stop_owned_pid_fallback "$pid"; then
+        clear_activity_runtime
+        write_activity_last "$ACTIVE_ACTIVITY_MODE" "" "Recorder IPC did not become ready; startup was aborted."
+        printf '%s: recorder IPC did not become ready; startup was aborted\n' "$PROGRAM" >&2
+      else
+        ACTIVE_ACTIVITY_STATE="error"
+        write_activity_state
+        write_activity_last "$ACTIVE_ACTIVITY_MODE" "" "Recorder IPC did not become ready and the owned process could not be stopped."
+        printf '%s: recorder IPC did not become ready and the owned process could not be stopped\n' "$PROGRAM" >&2
+      fi
+    else
+      clear_activity_runtime
+      write_activity_last "$ACTIVE_ACTIVITY_MODE" "" "Recorder failed during startup."
+      activity_log "recorder failed during startup mode=$ACTIVE_ACTIVITY_MODE"
+      printf '%s: recorder failed during startup\n' "$PROGRAM" >&2
+    fi
+    return 1
+  fi
+  disown "$pid" 2>/dev/null || true
+  return 0
+}
+
+record_start_command() {
+  local output_dir output
+  (( $# == 0 )) || die_usage "record start does not accept arguments"
+  prepare_activity_start
+  load_config
+  resolve_capture_target "$CONFIG_ACTIVITY_CAPTURE"
+  load_quality_args "$CONFIG_ACTIVITY_QUALITY"
+  load_audio_args "$CONFIG_ACTIVITY_AUDIO"
+  output_dir="$(activity_output_dir)"
+  ensure_activity_output_dir "$output_dir"
+  output="$(unique_activity_output "$output_dir" cam-stream-recording mp4)"
+
+  ACTIVE_ACTIVITY_MODE="record"
+  ACTIVE_ACTIVITY_STATE="recording"
+  ACTIVE_ACTIVITY_STARTED="$(date +%s)"
+  ACTIVE_ACTIVITY_CAPTURE="$CONFIG_ACTIVITY_CAPTURE"
+  ACTIVE_ACTIVITY_TARGET="$CAPTURE_TARGET"
+  ACTIVE_ACTIVITY_AUDIO="$CONFIG_ACTIVITY_AUDIO"
+  ACTIVE_ACTIVITY_QUALITY="$CONFIG_ACTIVITY_QUALITY"
+  ACTIVE_ACTIVITY_DESTINATION=""
+  ACTIVE_ACTIVITY_LOCAL_COPY="false"
+  ACTIVE_ACTIVITY_OUTPUT="$output"
+  write_activity_last record "" ""
+  activity_log "start mode=record capture=$CONFIG_ACTIVITY_CAPTURE audio=$CONFIG_ACTIVITY_AUDIO quality=$CONFIG_ACTIVITY_QUALITY"
+  launch_activity_gsr \
+    "${CAPTURE_ARGS[@]}" -s "$QUALITY_SIZE" -f "$QUALITY_FPS" -fm cfr \
+    -k h264 -q very_high -fallback-cpu-encoding yes -c mp4 \
+    "${AUDIO_ARGS[@]}" -ipc "$ACTIVITY_IPC" -o "$output"
+  printf 'Started recording: %s\n' "$output"
+}
+
+validate_live_server() {
+  local profile="$1" server="$2" remainder="" authority=""
+  config_value_safe "$server" || return 1
+  [[ $server != *[[:space:]]* ]] || return 1
+  case "$profile" in
+    x) [[ $server == rtmps://* ]] ;;
+    custom) [[ $server == rtmp://* || $server == rtmps://* ]] ;;
+    *) return 1 ;;
+  esac || return 1
+  [[ $server != *\?* && $server != *#* ]] || return 1
+  remainder="${server#*://}"
+  authority="${remainder%%/*}"
+  [[ -n $authority && $authority != *@* && $authority != :* ]] || return 1
+}
+
+live_configure_command() {
+  local profile="${1:-}" server="" key_stdin="false" key=""
+  (( $# > 0 )) && shift
+  [[ $profile == "x" || $profile == "custom" ]] || die_usage "live configure profile must be x or custom"
+  while (( $# > 0 )); do
+    case "$1" in
+      --server)
+        (( $# >= 2 )) || die_usage "--server requires a URL"
+        server="$2"; shift
+        ;;
+      --server=*) server="${1#*=}" ;;
+      --key-stdin) key_stdin="true" ;;
+      *) die_usage "unexpected live configure argument: $1" ;;
+    esac
+    shift
+  done
+  [[ -n $server ]] || die_usage "live configure requires --server URL"
+  [[ $key_stdin == "true" ]] || die_usage "live configure requires --key-stdin"
+  if ! validate_live_server "$profile" "$server"; then
+    if [[ $profile == "x" ]]; then die_usage "X requires an rtmps:// server URL"; else die_usage "custom server must use rtmp:// or rtmps://"; fi
+  fi
+  if [[ $profile == "custom" && $server == rtmp://* ]]; then
+    printf '%s: warning: custom RTMP is not encrypted; prefer RTMPS\n' "$PROGRAM" >&2
+  fi
+  tool_available "$SECRET_TOOL_BIN" || { printf '%s: Secret Service client not found; refusing to store a stream key in plaintext\n' "$PROGRAM" >&2; return 1; }
+  IFS= read -r key || true
+  [[ -n $key ]] || { printf '%s: stream key was empty\n' "$PROGRAM" >&2; return 1; }
+  [[ $key != *[[:space:]]* ]] || { key=""; printf '%s: stream key must not contain whitespace\n' "$PROGRAM" >&2; return 1; }
+  (( ${#key} <= 4096 )) || { key=""; printf '%s: stream key is unexpectedly long\n' "$PROGRAM" >&2; return 1; }
+  if IFS= read -r; then
+    key=""
+    unset REPLY
+    printf '%s: stream key input must contain exactly one line\n' "$PROGRAM" >&2
+    return 1
+  fi
+  if ! printf '%s' "$key" | "$SECRET_TOOL_BIN" store --label="Cam Stream $profile stream key" application "$PROGRAM" profile "$profile" >/dev/null 2>&1; then
+    key=""
+    printf '%s: Secret Service is unavailable; stream key was not saved\n' "$PROGRAM" >&2
+    return 1
+  fi
+  key=""
+  load_config
+  if [[ $profile == "x" ]]; then CONFIG_LIVE_SERVER_X="$server"; else CONFIG_LIVE_SERVER_CUSTOM="$server"; fi
+  CONFIG_ACTIVITY_DESTINATION="$profile"
+  if ! write_config; then
+    "$SECRET_TOOL_BIN" clear application "$PROGRAM" profile "$profile" >/dev/null 2>&1 || true
+    printf '%s: unable to save live profile settings\n' "$PROGRAM" >&2
+    return 1
+  fi
+  printf 'Configured %s live destination.\n' "$profile"
+}
+
+live_clear_command() {
+  local profile="${1:-}" key_warning=""
+  (( $# == 1 )) || die_usage "live clear expects x or custom"
+  [[ $profile == "x" || $profile == "custom" ]] || die_usage "live clear profile must be x or custom"
+  load_config
+  if [[ $profile == "x" ]]; then CONFIG_LIVE_SERVER_X=""; else CONFIG_LIVE_SERVER_CUSTOM=""; fi
+  write_config
+  if ! tool_available "$SECRET_TOOL_BIN"; then
+    key_warning="Secret Service client not found; a previously stored stream key may remain in the keyring."
+  elif ! "$SECRET_TOOL_BIN" clear application "$PROGRAM" profile "$profile" >/dev/null 2>&1; then
+    key_warning="Secret Service could not clear the stream key; it may remain in the keyring."
+  fi
+  [[ -z $key_warning ]] || printf '%s: warning: %s\n' "$PROGRAM" "$key_warning" >&2
+  printf 'Cleared %s live destination settings.\n' "$profile"
+}
+
+live_start_command() {
+  local profile="" local_copy="" server="" key="" stream_url="" output_dir output="" live_suffix=""
+  while (( $# > 0 )); do
+    case "$1" in
+      x|custom) [[ -z $profile ]] || die_usage "live start accepts only one destination"; profile="$1" ;;
+      --no-local-copy) local_copy="false" ;;
+      *) die_usage "unexpected live start argument: $1" ;;
+    esac
+    shift
+  done
+  prepare_activity_start
+  load_config
+  [[ -n $profile ]] || profile="$CONFIG_ACTIVITY_DESTINATION"
+  [[ -n $local_copy ]] || local_copy="$CONFIG_ACTIVITY_LOCAL_COPY"
+  if [[ $profile == "x" ]]; then server="$CONFIG_LIVE_SERVER_X"; else server="$CONFIG_LIVE_SERVER_CUSTOM"; fi
+  [[ -n $server ]] || { printf '%s: %s live destination is not configured\n' "$PROGRAM" "$profile" >&2; return 1; }
+  validate_live_server "$profile" "$server" || { printf '%s: saved live server is invalid; configure it again\n' "$PROGRAM" >&2; return 1; }
+  key="$(secret_lookup_key "$profile" 2>/dev/null || true)"
+  [[ -n $key ]] || { printf '%s: stream key is unavailable; configure the %s destination again\n' "$PROGRAM" "$profile" >&2; return 1; }
+  stream_url="${server%/}/$key"
+  resolve_capture_target "$CONFIG_ACTIVITY_CAPTURE"
+  load_quality_args "$CONFIG_ACTIVITY_QUALITY"
+  load_audio_args "$CONFIG_ACTIVITY_AUDIO"
+  output_dir="$(activity_output_dir)"
+  if [[ $local_copy == "true" ]]; then
+    ensure_activity_output_dir "$output_dir"
+    output="$(unique_activity_output "$output_dir" cam-stream-live mp4)"
+  fi
+
+  ACTIVE_ACTIVITY_MODE="live"
+  ACTIVE_ACTIVITY_STATE="sending"
+  ACTIVE_ACTIVITY_STARTED="$(date +%s)"
+  ACTIVE_ACTIVITY_CAPTURE="$CONFIG_ACTIVITY_CAPTURE"
+  ACTIVE_ACTIVITY_TARGET="$CAPTURE_TARGET"
+  ACTIVE_ACTIVITY_AUDIO="$CONFIG_ACTIVITY_AUDIO"
+  ACTIVE_ACTIVITY_QUALITY="$CONFIG_ACTIVITY_QUALITY"
+  ACTIVE_ACTIVITY_DESTINATION="$profile"
+  ACTIVE_ACTIVITY_LOCAL_COPY="$local_copy"
+  ACTIVE_ACTIVITY_OUTPUT="$output"
+  write_activity_last live "" ""
+  activity_log "start mode=live destination=$profile capture=$CONFIG_ACTIVITY_CAPTURE audio=$CONFIG_ACTIVITY_AUDIO quality=$CONFIG_ACTIVITY_QUALITY local_copy=$local_copy"
+  local -a args=(
+    "${CAPTURE_ARGS[@]}" -s "$QUALITY_SIZE" -f "$QUALITY_FPS" -fm cfr
+    -k h264 -bm cbr -q "$QUALITY_BITRATE" -keyint 3 -fallback-cpu-encoding yes -c flv
+    "${AUDIO_ARGS[@]}" -ipc "$ACTIVITY_IPC"
+  )
+  [[ $local_copy == "true" ]] && args+=(-ro "$output_dir")
+  args+=(-o "$stream_url")
+  if ! launch_activity_gsr "${args[@]}"; then
+    key=""; stream_url=""; args=()
+    return 1
+  fi
+  key=""; stream_url=""; args=()
+  if [[ $local_copy == "true" ]]; then
+    if ! "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" start-replay-recording >/dev/null 2>&1; then
+      local pid=""
+      pid="$(activity_running_pid 2>/dev/null || true)"
+      if [[ -n $pid ]]; then
+        if "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" stop >/dev/null 2>&1; then
+          wait_for_activity_exit "$pid" || stop_owned_pid_fallback "$pid" || true
+        else
+          stop_owned_pid_fallback "$pid" || true
+        fi
+      fi
+      if [[ -n $pid ]] && process_is_live "$pid"; then
+        ACTIVE_ACTIVITY_STATE="error"
+        write_activity_state
+        write_activity_last live "" "Local recording could not start and the owned live process could not be stopped."
+        activity_log "local copy failed to start; owned live process could not be stopped destination=$profile pid=$pid"
+        printf '%s: local recording could not start and the owned live process could not be stopped\n' "$PROGRAM" >&2
+        return 1
+      fi
+      clear_activity_runtime
+      write_activity_last live "" "Local recording could not start; live sending was aborted."
+      activity_log "local copy failed to start; live sending aborted destination=$profile"
+      printf '%s: local recording could not start; live sending was aborted\n' "$PROGRAM" >&2
+      return 1
+    fi
+  fi
+  [[ $local_copy == "true" ]] && live_suffix=" with local recording"
+  printf 'Sending to %s%s.\n' "$profile" "$live_suffix"
+}
+
+record_pause_state_command() {
+  local pause="$1" pid desired command_label
+  refresh_activity_runtime
+  pid="$(activity_running_pid 2>/dev/null || true)"
+  [[ -n $pid ]] || { printf '%s: recording is already stopped\n' "$PROGRAM" >&2; return 1; }
+  load_activity_state
+  [[ $ACTIVE_ACTIVITY_MODE == "record" ]] || { printf '%s: live sending is active; it cannot be paused here\n' "$PROGRAM" >&2; return 1; }
+  if [[ $pause == "true" ]]; then desired="paused"; command_label="Paused"; else desired="recording"; command_label="Resumed"; fi
+  if ! "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" set-paused "$pause" >/dev/null 2>&1; then
+    printf '%s: recorder did not accept the pause command\n' "$PROGRAM" >&2
+    return 1
+  fi
+  ACTIVE_ACTIVITY_STATE="$desired"
+  write_activity_state
+  activity_log "$desired mode=record pid=$pid"
+  printf '%s recording.\n' "$command_label"
+}
+
+record_stop_command() {
+  local pid output error="" last_output=""
+  (( $# == 0 )) || die_usage "record stop does not accept arguments"
+  refresh_activity_runtime
+  pid="$(activity_running_pid 2>/dev/null || true)"
+  if [[ -z $pid ]]; then printf 'Recording is already stopped.\n'; return; fi
+  load_activity_state
+  [[ $ACTIVE_ACTIVITY_MODE == "record" ]] || { printf '%s: live sending is active; use live stop\n' "$PROGRAM" >&2; return 1; }
+  output="$ACTIVE_ACTIVITY_OUTPUT"
+  if ! "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" stop >/dev/null 2>&1; then
+    printf '%s: recorder did not accept the stop command\n' "$PROGRAM" >&2
+    return 1
+  fi
+  if ! wait_for_activity_exit "$pid"; then
+    printf '%s: recorder is still finalising; try status again shortly\n' "$PROGRAM" >&2
+    return 1
+  fi
+  clear_activity_runtime
+  if [[ ! -f $output ]]; then
+    error="Recording stopped, but the expected MP4 was not created."
+  elif [[ ! -s $output ]]; then
+    error="Recording stopped, but the expected MP4 is empty."
+  fi
+  if [[ -n $error ]]; then
+    [[ -f $output ]] && last_output="$output"
+    write_activity_last record "$last_output" "$error"
+    activity_log "stop mode=record output_saved=false"
+    printf '%s: %s Expected path: %s\n' "$PROGRAM" "$error" "$output" >&2
+    return 1
+  fi
+  write_activity_last record "$output" ""
+  activity_log "stop mode=record output_saved=true"
+  printf 'Saved recording: %s\n' "$output"
+}
+
+REMUX_OUTPUT=""
+REMUX_ERROR=""
+
+remux_live_copy() {
+  local source="$1" destination="$2" destination_dir destination_name temporary
+  REMUX_OUTPUT="$source"
+  REMUX_ERROR=""
+  if [[ -z $source || ! -f $source ]]; then
+    REMUX_ERROR="Local recording file was not returned by the recorder."
+    return 1
+  fi
+  tool_available "$FFMPEG_BIN" || {
+    REMUX_ERROR="FFmpeg is unavailable; the local recording was retained as FLV."
+    return 1
+  }
+  destination_dir="${destination%/*}"
+  destination_name="${destination##*/}"
+  temporary="$destination_dir/.${destination_name%.mp4}.remux-$$.mp4"
+  if ! "$FFMPEG_BIN" -nostdin -hide_banner -loglevel error -y -i "$source" -c copy -movflags +faststart "$temporary" >/dev/null 2>&1; then
+    rm -f -- "$temporary"
+    REMUX_ERROR="MP4 remux failed; the local recording was retained as FLV."
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$destination"; then
+    rm -f -- "$temporary"
+    REMUX_ERROR="MP4 finalisation failed; the local recording was retained as FLV."
+    return 1
+  fi
+  if [[ $source != "$destination" ]]; then rm -f -- "$source"; fi
+  REMUX_OUTPUT="$destination"
+  return 0
+}
+
+live_stop_command() {
+  local pid replay_result="" replay_path="" output="" error="" stop_failed="false"
+  (( $# == 0 )) || die_usage "live stop does not accept arguments"
+  refresh_activity_runtime
+  pid="$(activity_running_pid 2>/dev/null || true)"
+  if [[ -z $pid ]]; then printf 'Live sending is already stopped.\n'; return; fi
+  load_activity_state
+  [[ $ACTIVE_ACTIVITY_MODE == "live" ]] || { printf '%s: recording is active; use record stop\n' "$PROGRAM" >&2; return 1; }
+  if [[ $ACTIVE_ACTIVITY_LOCAL_COPY == "true" ]]; then
+    if replay_result="$("$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" stop-replay-recording 2>/dev/null)"; then
+      replay_path="${replay_result##*$'\n'}"
+    else
+      error="Local recording could not be finalised."
+    fi
+  fi
+  if ! "$GSR_CLI_BIN" -ipc "$ACTIVITY_IPC" stop >/dev/null 2>&1; then stop_failed="true"; fi
+  if [[ $stop_failed == "true" ]] && process_is_live "$pid"; then
+    printf '%s: recorder did not accept the stop command\n' "$PROGRAM" >&2
+    return 1
+  fi
+  if ! wait_for_activity_exit "$pid"; then
+    printf '%s: recorder is still stopping; try status again shortly\n' "$PROGRAM" >&2
+    return 1
+  fi
+  clear_activity_runtime
+  if [[ $ACTIVE_ACTIVITY_LOCAL_COPY == "true" && -z $error ]]; then
+    if remux_live_copy "$replay_path" "$ACTIVE_ACTIVITY_OUTPUT"; then
+      output="$REMUX_OUTPUT"
+    else
+      output="$REMUX_OUTPUT"
+      error="$REMUX_ERROR"
+    fi
+  fi
+  write_activity_last live "$output" "$error"
+  activity_log "stop mode=live local_copy=$ACTIVE_ACTIVITY_LOCAL_COPY output_saved=$([[ -n $output ]] && printf true || printf false) error=$([[ -n $error ]] && printf true || printf false)"
+  if [[ -n $error ]]; then
+    if [[ -n $output ]]; then
+      printf '%s: %s Retained file: %s\n' "$PROGRAM" "$error" "$output" >&2
+    else
+      printf '%s: %s\n' "$PROGRAM" "$error" >&2
+    fi
+    return 1
+  fi
+  if [[ -n $output ]]; then printf 'Stopped sending. Saved local recording: %s\n' "$output"; else printf 'Stopped sending.\n'; fi
+}
+
+with_activity_lock() {
+  tool_available flock || { printf '%s: required command not found: flock\n' "$PROGRAM" >&2; return 1; }
+  exec 8> "$ACTIVITY_LOCK_FILE"
+  if ! flock -n 8; then
+    printf '%s: another activity control operation is already in progress\n' "$PROGRAM" >&2
+    return 1
+  fi
+  "$@"
+}
+
 process_matches() {
   local pid="$1"
   [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
@@ -577,7 +1657,9 @@ status_command() {
     json_string_or_null "$capture_size"
     printf ',"captureFps":'
     json_string_or_null "$capture_fps"
-    printf ',"appId":"%s","title":"%s"}\n' "$APP_ID" "$WINDOW_TITLE"
+    printf ',"appId":"%s","title":"%s","activity":' "$APP_ID" "$WINDOW_TITLE"
+    emit_activity_status_json false
+    printf '}\n'
   else
     if [[ $running == "true" ]]; then printf 'Preview: running (PID %s)\n' "$pid"; else printf 'Preview: stopped\n'; fi
     printf 'IPC: %s (%s)\n' "$ipc_state" "$IPC"
@@ -586,6 +1668,8 @@ status_command() {
     if [[ -n $capture_format || -n $capture_size || -n $capture_fps ]]; then
       printf 'Capture: %s %s @ %s fps\n' "${capture_format:-?}" "${capture_size:-?}" "${capture_fps:-?}"
     fi
+    collect_activity_status
+    printf 'Activity: %s (%s)\n' "$STATUS_ACTIVITY_STATE" "$STATUS_ACTIVITY_MODE"
   fi
 }
 
@@ -878,6 +1962,52 @@ doctor_command() {
     checks+=("jq|warn|not found; preview still works without automatic positioning")
     ((warnings += 1))
   fi
+  local studio_name studio_tool
+  while IFS='|' read -r studio_name studio_tool; do
+    if tool_available "$studio_tool"; then
+      checks+=("$studio_name|pass|found $(tool_path "$studio_tool")")
+    else
+      checks+=("$studio_name|warn|not found; required for Record and Live")
+      ((warnings += 1))
+    fi
+  done <<EOF
+gpu-screen-recorder|$GSR_BIN
+gsr-cli|$GSR_CLI_BIN
+ffmpeg|$FFMPEG_BIN
+secret-tool|$SECRET_TOOL_BIN
+EOF
+  if tool_available "$FOCUSED_MONITOR_BIN"; then
+    checks+=("capture-monitor|pass|using Omarchy focused-monitor helper")
+  elif tool_available "$HYPRCTL_BIN" && tool_available "$JQ_BIN"; then
+    checks+=("capture-monitor|pass|using the Hyprland JSON fallback")
+  else
+    checks+=("capture-monitor|warn|focused monitor discovery is unavailable")
+    ((warnings += 1))
+  fi
+  if tool_available "$CAPTURE_PICKER_BIN"; then
+    checks+=("capture-picker|pass|using Omarchy capture picker helper")
+  elif tool_available "$HYPRCTL_BIN" && tool_available "$JQ_BIN" && tool_available "$SLURP_BIN"; then
+    checks+=("capture-picker|pass|using the built-in Hyprland and slurp picker")
+  else
+    checks+=("capture-picker|warn|window and region capture picker dependencies are unavailable")
+    ((warnings += 1))
+  fi
+  if tool_available "$GSR_BIN" && tool_available "$GSR_CLI_BIN"; then
+    if gsr_has_owned_ipc; then
+      checks+=("recorder-ipc|pass|owned recorder IPC is supported")
+    else
+      checks+=("recorder-ipc|warn|installed recorder tools do not advertise IPC support")
+      ((warnings += 1))
+    fi
+  fi
+  local other_recorders=""
+  other_recorders="$(other_gsr_pids 2>/dev/null || true)"
+  if [[ -n $other_recorders ]]; then
+    checks+=("recorder-use|warn|another GPU Screen Recorder process is active")
+    ((warnings += 1))
+  else
+    checks+=("recorder-use|pass|no conflicting GPU Screen Recorder process detected")
+  fi
   local -a rows=()
   mapfile -t rows < <(camera_rows)
   if (( ${#rows[@]} > 0 )); then checks+=("cameras|pass|${#rows[@]} visible device node(s)"); else checks+=("cameras|fail|no camera device nodes found"); ((failures += 1)); fi
@@ -961,6 +2091,43 @@ main() {
       local subcommand="${1:-show}"
       (( $# > 0 )) && shift
       case "$subcommand" in show) settings_show "$@" ;; set) settings_set "$@" ;; *) die_usage "unknown settings command: $subcommand" ;; esac
+      ;;
+    activity)
+      local subcommand="${1:-settings}"
+      (( $# > 0 )) && shift
+      case "$subcommand" in
+        settings|show) activity_settings_command "$@" ;;
+        set) with_activity_lock activity_set_command "$@" ;;
+        status) activity_status_command "$@" ;;
+        help|-h|--help) printf 'Activity commands: settings, set, status\n' ;;
+        *) die_usage "unknown activity command: $subcommand" ;;
+      esac
+      ;;
+    record)
+      local subcommand="${1:-status}"
+      (( $# > 0 )) && shift
+      case "$subcommand" in
+        start) with_activity_lock record_start_command "$@" ;;
+        pause) (( $# == 0 )) || die_usage "record pause does not accept arguments"; with_activity_lock record_pause_state_command true ;;
+        resume) (( $# == 0 )) || die_usage "record resume does not accept arguments"; with_activity_lock record_pause_state_command false ;;
+        stop) with_activity_lock record_stop_command "$@" ;;
+        status) activity_status_command "$@" ;;
+        help|-h|--help) printf 'Record commands: start, pause, resume, stop, status\n' ;;
+        *) die_usage "unknown record command: $subcommand" ;;
+      esac
+      ;;
+    live)
+      local subcommand="${1:-status}"
+      (( $# > 0 )) && shift
+      case "$subcommand" in
+        configure) with_activity_lock live_configure_command "$@" ;;
+        clear) with_activity_lock live_clear_command "$@" ;;
+        start) with_activity_lock live_start_command "$@" ;;
+        stop) with_activity_lock live_stop_command "$@" ;;
+        status) activity_status_command "$@" ;;
+        help|-h|--help) printf 'Live commands: configure, clear, start, stop, status\n' ;;
+        *) die_usage "unknown live command: $subcommand" ;;
+      esac
       ;;
     start)
       parse_launch_args "$@"
