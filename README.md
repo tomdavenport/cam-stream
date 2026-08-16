@@ -44,6 +44,17 @@ Install the native bar widget and enable it immediately:
 omarchy plugin add https://github.com/tomdavenport/cam-stream.git --enable
 ```
 
+Already have Cam Stream in your bar? Skip `add` and update the existing
+checkout instead:
+
+```bash
+omarchy plugin update io.github.tomdavenport.cam-stream
+```
+
+The updater deliberately shows the incoming diff and asks for confirmation
+before it changes anything. Confirm the prompt after reviewing it, or append
+`--yes` when you have already reviewed and trust the release.
+
 No AUR package is needed for the widget: the plugin includes its own helper.
 Left click the new icon to toggle the camera, or right click it for Camera,
 Record, and Live Stream controls.
@@ -239,7 +250,12 @@ omarchy plugin update io.github.tomdavenport.cam-stream
 
 Omarchy fetches the repository, shows the incoming diff for review, and only
 accepts a fast-forward update that still passes plugin validation. The shell
-rescans updated plugins automatically.
+rescans updated plugins automatically. If you have already reviewed the
+release and do not need the interactive diff prompt, run:
+
+```bash
+omarchy plugin update io.github.tomdavenport.cam-stream --yes
+```
 
 ## Disable or remove
 
