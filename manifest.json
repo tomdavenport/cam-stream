@@ -5,7 +5,7 @@
   "version": "1.1.0",
   "author": "Tom Davenport",
   "license": "MIT",
-  "description": "A low-latency camera, screen recorder, and live-stream control for the Omarchy Quattro bar.",
+  "description": "Stream or record the Omarchy desktop you already use—no OBS scene required. Cam Stream keeps its low-latency camera preview as a normal movable, resizable window, captures a focused monitor, window, or region, and sends the capture to X Live Studio or a custom RTMP(S) endpoint, with keyring-protected stream keys and a local copy enabled by default.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Cam Stream",
-    "description": "Control a low-latency camera preview, record the screen, or send it to an RTMP(S) destination.",
+    "description": "Control a movable, low-latency camera window; record a monitor, window, or region; or send the selected capture to X or RTMP(S).",
     "category": "Media",
     "defaultSection": "right",
     "allowMultiple": false
