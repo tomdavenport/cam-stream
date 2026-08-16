@@ -1,15 +1,15 @@
 # Cam Stream
 
 <p align="center">
-  <strong>Camera, recording, and live streaming—native to Omarchy 4 / Quattro.</strong><br>
-  Stream the full desktop and treat your camera like any other Omarchy window.
-  Move it, resize it, tile it, or hide it in real time. No OBS scene required.
+  <strong>Stream the Omarchy desktop you already use.</strong><br>
+  Your camera is a normal movable, resizable window—not a fixed OBS overlay.<br>
+  Capture a focused monitor, window, or region; record it or send it live.
 </p>
 
 <p align="center">
   <img
     src="assets/cam-stream-hero.png"
-    alt="Cam Stream running on an Omarchy Quattro desktop, with a live streamer camera preview and the native control panel open"
+    alt="Cam Stream on an Omarchy Quattro desktop with a movable streamer camera window and the Live Stream controls open for focused-monitor capture, microphone audio, 1080p60, X, and a local copy"
     width="100%"
   >
 </p>
@@ -22,17 +22,27 @@
   <a href="LICENSE"><strong>MIT licensed</strong></a>
 </p>
 
-Cam Stream puts a camera, recorder, and live-stream control in the Omarchy bar.
-Left click the icon to start or stop the low-latency camera window. Right click
-to record the screen or send it directly to X Live Studio or another RTMP(S)
-destination. The camera keeps its own state throughout: starting or stopping a
-recording never changes it.
+## Omarchy is the scene
 
-Full-screen capture is the default. Window and freeform region pickers use the
-familiar Omarchy capture flow, and the last capture mode is remembered. A local
-copy is recorded by default while sending live. The widget follows the active
-theme and shows distinct camera, recording, sending, stopped, error, and
-no-camera states.
+Cam Stream turns the desktop itself into the streaming layout. Instead of
+rebuilding your windows inside a fixed OBS canvas, arrange Omarchy exactly as
+you want viewers to see it and capture that. The camera preview behaves like
+any other Omarchy window: move it, resize it, tile it, float it, or hide it
+while the stream is running. Its video fills the window as the layout changes.
+
+| Camera | Record | Live Stream |
+| --- | --- | --- |
+| Low-latency V4L2 preview with realtime and smoother modes, camera selection, and mirroring. | Capture the focused monitor, a picked window, or a freeform region with your chosen audio and quality; pause, resume, and save to MP4. | Send the same capture to X Live Studio or a custom RTMP(S) endpoint; keys stay in the desktop keyring and a local copy is enabled by default. |
+
+The camera and capture activity deliberately keep separate state. Starting or
+stopping a recording or live send never changes the camera window, so the
+layout on screen stays under your control. Full screen is the default capture
+mode; the familiar Omarchy window and region pickers are also available, and
+Cam Stream remembers the last choice.
+
+Cam Stream lives in the Omarchy bar. Left click toggles the camera. Right click
+opens the themed Camera, Record, and Live Stream controls, with distinct states
+for previewing, recording, sending, stopped, error, and no-camera conditions.
 
 ## Install
 
@@ -78,8 +88,8 @@ Cam Stream is live in the project-recommended community gallery. Open the
 to review it or copy the install command. Its
 [submission issue](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/129)
 passed automated Quattro validation and maintainer review; the marketplace
-tracks the current validated `main` branch for later versions and preview
-updates.
+periodically revalidates the current `main` branch for later versions,
+description changes, and preview updates.
 
 Plugin authors can submit another public Quattro plugin by following the
 marketplace's [submission guide](https://github.com/HANCORE-linux/omarchy-plugin-marketplace/blob/main/SUBMISSION.md).
@@ -204,7 +214,9 @@ frame rate; recordings use GPU Screen Recorder's very-high quality mode.
 
 Cam Stream supports an **X** profile and a **Custom** RTMP(S) profile. X always
 uses encrypted RTMPS; custom destinations may use RTMP, though RTMPS is strongly
-recommended. For X:
+recommended. Cam Stream does not sign in to X or publish on your behalf. It
+sends to the RTMPS ingest that X Live Studio gives you; previewing, going public,
+and ending the broadcast stay in X. To use it:
 
 1. Open [X Live Studio](https://x.com/i/live-studio) and create or select a
    source.
