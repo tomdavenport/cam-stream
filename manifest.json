@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.tomdavenport.cam-stream",
   "name": "Cam Stream",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Tom Davenport",
   "license": "MIT",
   "description": "Stream or record the Omarchy desktop you already use—no OBS scene required. Cam Stream keeps its low-latency camera preview as a normal movable, resizable window, captures a focused monitor, window, or region, and sends the capture to X Live Studio or a custom RTMP(S) endpoint, with keyring-protected stream keys and a local copy enabled by default.",

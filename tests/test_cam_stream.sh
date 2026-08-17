@@ -3,12 +3,35 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CAM_STREAM="$ROOT/bin/cam-stream"
-TEST_ROOT="$(mktemp -d)"
-if [[ ${CAM_STREAM_KEEP_TEST_ROOT:-false} == "true" ]]; then
-  printf 'Keeping test root: %s\n' "$TEST_ROOT" >&2
-else
-  trap 'rm -rf "$TEST_ROOT"' EXIT
-fi
+TEST_ROOT="$(mktemp -d -t cam-stream-camera-test.XXXXXXXX)"
+TEST_PIDS=()
+
+cleanup() {
+  local pid_file pid cmdline=""
+  while IFS= read -r -d '' pid_file; do
+    read -r pid < "$pid_file" || continue
+    [[ $pid =~ ^[0-9]+$ ]] || continue
+    cmdline="$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)"
+    if [[ $cmdline == *"$TEST_ROOT"* ]]; then
+      kill -s KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done < <(find "$TEST_ROOT" -type f -name cam-stream.pid -print0 2>/dev/null)
+  for pid in "${TEST_PIDS[@]}"; do
+    cmdline="$(tr '\0' ' ' 2>/dev/null < "/proc/$pid/cmdline" || true)"
+    if [[ $cmdline == *"$TEST_ROOT"* ]]; then
+      kill -s KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  if [[ ${CAM_STREAM_KEEP_TEST_ROOT:-false} == "true" ]]; then
+    printf 'Keeping test root: %s\n' "$TEST_ROOT" >&2
+  else
+    rm -rf -- "$TEST_ROOT"
+  fi
+}
+
+trap cleanup EXIT
 
 PASS=0
 FAIL=0
@@ -232,6 +255,61 @@ assert_contains "$output" 'Stopped camera preview' "explicit stop terminates the
 output="$($CAM_STREAM stop)"
 assert_contains "$output" 'already stopped' "stop is idempotent"
 
+setup_case
+: > "$DEV_DIR/video0"
+export CAM_STREAM_MPV_SIGNAL_LOG="$CASE_ROOT/mpv-signals.log"
+# shellcheck disable=SC2016 # Stub bodies intentionally expand when invoked.
+write_stub mpv '
+ipc=""
+for arg in "$@"; do
+  case "$arg" in --input-ipc-server=*) ipc="${arg#*=}" ;; esac
+done
+if [[ -n "$ipc" ]]; then
+  : > "${CAM_STREAM_MPV_IPC_MARKER:?}"
+  : > "$ipc"
+fi
+trap '\''printf "%s\n" TERM >> "${CAM_STREAM_MPV_SIGNAL_LOG:?}"'\'' TERM
+trap '\''printf "%s\n" INT >> "${CAM_STREAM_MPV_SIGNAL_LOG:?}"'\'' INT
+while :; do sleep 0.1; done'
+$CAM_STREAM start >/dev/null
+stubborn_pid="$(<"$XDG_STATE_HOME/cam-stream/cam-stream.pid")"
+output="$($CAM_STREAM stop 2>"$CASE_ROOT/stop.err")"
+assert_contains "$output" 'Stopped camera preview' "stop force-terminates an unresponsive preview"
+assert_eq "" "$(<"$CASE_ROOT/stop.err")" "successful forced stop has no command error"
+signals="$(<"$CAM_STREAM_MPV_SIGNAL_LOG")"
+assert_contains "$signals" 'TERM' "stop attempts graceful preview termination first"
+output="$($CAM_STREAM status --json)"
+assert_contains "$output" '"running":false' "forced preview stop reports stopped"
+if [[ ! -e $XDG_STATE_HOME/cam-stream/cam-stream.pid ]]; then pass "forced preview stop removes PID state"; else fail "forced preview stop removes PID state"; fi
+if [[ ! -e $XDG_STATE_HOME/cam-stream/active ]]; then pass "forced preview stop removes active state"; else fail "forced preview stop removes active state"; fi
+if [[ ! -e $XDG_RUNTIME_DIR/cam-stream/mpv.sock ]]; then pass "forced preview stop removes IPC state"; else fail "forced preview stop removes IPC state"; fi
+stubborn_state="$(ps -o stat= -p "$stubborn_pid" 2>/dev/null || true)"
+if [[ -z $stubborn_state || $stubborn_state == Z* || $stubborn_state == X* ]]; then
+  pass "forced preview process is no longer live"
+else
+  fail "forced preview process is no longer live"
+fi
+unset CAM_STREAM_MPV_SIGNAL_LOG
+
+setup_case
+mkdir -p "$XDG_STATE_HOME/cam-stream"
+write_stub unrelated-preview-sentinel '
+trap "exit 0" TERM INT
+while :; do sleep 0.1; done'
+"$STUB_BIN/unrelated-preview-sentinel" &
+unrelated_pid=$!
+TEST_PIDS+=("$unrelated_pid")
+printf '%s\n' "$unrelated_pid" > "$XDG_STATE_HOME/cam-stream/cam-stream.pid"
+output="$($CAM_STREAM stop)"
+assert_contains "$output" 'already stopped' "stale PID state is treated as stopped"
+unrelated_state="$(ps -o stat= -p "$unrelated_pid" 2>/dev/null || true)"
+if [[ -n $unrelated_state && $unrelated_state != Z* && $unrelated_state != X* ]]; then pass "stale PID state never signals an unrelated process"; else fail "stale PID state never signals an unrelated process"; fi
+kill "$unrelated_pid" 2>/dev/null || true
+wait "$unrelated_pid" 2>/dev/null || true
+TEST_PIDS=()
+
+setup_case
+: > "$DEV_DIR/video0"
 output="$($CAM_STREAM toggle)"
 assert_contains "$output" 'Started camera preview' "explicit toggle starts when stopped"
 output="$($CAM_STREAM toggle)"

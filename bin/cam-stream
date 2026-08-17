@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROGRAM="cam-stream"
-VERSION="1.1.0"
+VERSION="1.1.1"
 APP_ID="io.github.tomdavenport.cam-stream"
 WINDOW_TITLE="Cam Stream Camera Preview"
 
@@ -1169,7 +1169,7 @@ gsr_has_owned_ipc() {
 process_is_live() {
   local pid="$1" stat rest state
   [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/stat ]] || return 1
-  stat="$(<"/proc/$pid/stat")"
+  IFS= read -r stat 2>/dev/null < "/proc/$pid/stat" || return 1
   rest="${stat##*) }"
   state="${rest%% *}"
   [[ $state != "Z" && $state != "X" ]]
@@ -1604,9 +1604,10 @@ with_activity_lock() {
 }
 
 process_matches() {
-  local pid="$1"
+  local pid="$1" cmdline=""
   [[ $pid =~ ^[0-9]+$ && -r /proc/$pid/cmdline ]] || return 1
-  tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq -- "--input-ipc-server=$IPC"
+  cmdline="$(tr '\0' '\n' 2>/dev/null < "/proc/$pid/cmdline" || true)"
+  grep -Fxq -- "--input-ipc-server=$IPC" <<< "$cmdline"
 }
 
 running_pid() {
@@ -1619,6 +1620,20 @@ running_pid() {
     if process_matches "$pid"; then printf '%s\n' "$pid"; return; fi
   done < <(pgrep -x mpv 2>/dev/null || true)
   return 1
+}
+
+preview_process_is_live() {
+  local pid="$1"
+  process_is_live "$pid" && process_matches "$pid"
+}
+
+wait_for_preview_exit() {
+  local pid="$1" attempts="$2"
+  for ((; attempts > 0; attempts--)); do
+    preview_process_is_live "$pid" || return 0
+    sleep 0.05
+  done
+  ! preview_process_is_live "$pid"
 }
 
 status_command() {
@@ -1831,23 +1846,32 @@ launch_mpv() {
 }
 
 stop_preview() {
-  local pid
+  local pid forced="false"
   pid="$(running_pid 2>/dev/null || true)"
   if [[ -z $pid ]]; then
     rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
     printf 'Camera preview is already stopped.\n'
     return
   fi
-  kill "$pid" 2>/dev/null || true
-  for _ in {1..40}; do
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.05
-  done
-  if kill -0 "$pid" 2>/dev/null; then
+  if preview_process_is_live "$pid"; then
+    kill -s TERM "$pid" 2>/dev/null || true
+  fi
+  if ! wait_for_preview_exit "$pid" 40; then
+    # Some V4L2 devices leave mpv stuck while it tears down capture buffers.
+    # Re-check the exact private IPC argument before escalating so stale or
+    # recycled PID state is not blindly force-stopped.
+    if preview_process_is_live "$pid"; then
+      if kill -s KILL "$pid" 2>/dev/null; then forced="true"; fi
+    fi
+  fi
+  if ! wait_for_preview_exit "$pid" 20; then
     printf '%s: preview did not stop cleanly (PID %s)\n' "$PROGRAM" "$pid" >&2
     return 1
   fi
   rm -f "$PID_FILE" "$ACTIVE_FILE" "$IPC"
+  if [[ $forced == "true" ]]; then
+    printf '[%s] force-stopped unresponsive camera preview pid=%s\n' "$(date -Is)" "$pid" 2>/dev/null >> "$LOG_FILE" || true
+  fi
   printf 'Stopped camera preview.\n'
 }
 
