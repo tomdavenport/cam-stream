@@ -2,6 +2,17 @@
 
 All notable changes to Cam Stream are documented here.
 
+## 1.1.1 — 2026-08-17
+
+- Keep the existing graceful camera-preview shutdown window, then force-stop
+  `mpv` when a V4L2 device leaves it stuck during capture teardown.
+- Revalidate the live process and Cam Stream's private IPC argument before
+  signaling or escalating, avoiding stale or unrelated PIDs.
+- Treat exited zombies as stopped and make `/proc` lifecycle checks quiet when
+  a process disappears mid-read.
+- Add regression coverage for unresponsive preview shutdown, complete runtime
+  cleanup, and stale-PID safety.
+
 ## 1.1.0 — 2026-08-14
 
 - Add native full-screen, window, and region recording without an OBS scene.
