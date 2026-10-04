@@ -373,6 +373,7 @@ camera_rows() {
   # The unquoted pattern is intentional; tests override it with an isolated glob.
   for dev in $pattern; do
     [[ -e $dev ]] || continue
+    [[ -r $dev && -w $dev ]] || continue
     info=""
     if command -v v4l2-ctl >/dev/null 2>&1; then
       info="$(v4l2-ctl -d "$dev" --all 2>/dev/null || true)"
@@ -390,9 +391,7 @@ camera_rows() {
     [[ -r $dev ]] && readable="true"
     [[ -w $dev ]] && writable="true"
     busy=""
-    if command -v fuser >/dev/null 2>&1; then
-      busy="$(fuser "$dev" 2>/dev/null | xargs 2>/dev/null || true)"
-    fi
+    busy="$(device_busy_pids "$dev")"
     stable="$(stable_device_path "$dev")"
     printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
       "$dev" "$stable" "$role" "${card:-?}" "${bus:-?}" "$readable" "$writable" "$busy"
@@ -1689,6 +1688,14 @@ status_command() {
 }
 
 device_busy_pids() {
+  # Loopback producers must hold the device open to supply frames. fuser
+  # cannot distinguish that writer from capture clients; let V4L2 report
+  # actual capture conflicts when the preview opens instead.
+  if command -v v4l2-ctl >/dev/null 2>&1 &&
+    v4l2-ctl -d "$1" --info 2>/dev/null | \
+      LC_ALL=C grep -Eq 'Driver name[[:space:]]*:[[:space:]]*v4l2 loopback'; then
+    return 0
+  fi
   command -v fuser >/dev/null 2>&1 || return 0
   fuser "$1" 2>/dev/null | xargs 2>/dev/null || true
 }
