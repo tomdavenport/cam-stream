@@ -107,6 +107,7 @@ case "$name" in
   video0)
     cat <<EOF
 Driver Info:
+        Driver name      : ${CAM_STREAM_TEST_DRIVER:-uvcvideo}
         Card type        : Test Camera
         Bus info         : usb-test-1
         Device Caps
@@ -349,6 +350,27 @@ assert_status 2 "unknown command returns usage status" "$CAM_STREAM" wat
 assert_status 2 "missing option value returns usage status" "$CAM_STREAM" start --fps
 assert_status 2 "invalid setting returns usage status" "$CAM_STREAM" settings set mirror maybe
 assert_status 2 "invalid log count returns usage status" "$CAM_STREAM" logs zero
+
+setup_case
+: > "$DEV_DIR/video0"
+write_stub fuser 'printf "12345\\n"'
+output="$($CAM_STREAM camera list --json)"
+assert_contains "$output" '"busyPids":[12345]' "physical camera retains competing-process warning"
+assert_status 1 "physical camera with a competing process is rejected" "$CAM_STREAM" start
+
+export CAM_STREAM_TEST_DRIVER="v4l2 loopback"
+output="$($CAM_STREAM camera list --json)"
+assert_contains "$output" '"busyPids":[]' "loopback producer is not reported as a competing capture client"
+output="$($CAM_STREAM start)"
+assert_contains "$output" 'Started camera preview' "loopback preview starts while its producer holds the device"
+$CAM_STREAM stop >/dev/null
+unset CAM_STREAM_TEST_DRIVER
+
+: > "$DEV_DIR/video1"
+chmod 000 "$DEV_DIR/video1"
+output="$($CAM_STREAM camera list --json)"
+assert_not_contains "$output" 'Test Metadata' "inaccessible devices are omitted from camera discovery"
+chmod 600 "$DEV_DIR/video1"
 
 widget_source="$(<"$ROOT/BarWidget.qml")"
 assert_contains "$widget_source" 'running: root.statusLoaded && !root.streamRunning' "widget suspends automatic camera probing while streaming"
